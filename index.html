@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Hisab-Cloud — AI Shared Expense & Split Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: #070a12;
+      color: #f1f5f9;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .glass-card {
+      background: rgba(15, 21, 36, 0.85);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(51, 65, 85, 0.55);
+    }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- ==================== 1. GOOGLE LOGIN SCREEN ==================== -->
+  <div id="auth-screen" class="fixed inset-0 z-50 bg-[#070a12] flex items-center justify-center p-5">
+    <div class="w-full max-w-md glass-card rounded-3xl p-7 text-center space-y-6 shadow-2xl">
+      <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center text-3xl text-slate-950 shadow-lg shadow-cyan-500/20">
+        <i class="fa-solid fa-wallet"></i>
+      </div>
+      <div class="space-y-2">
+        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+          AI-Powered Cloud Split Manager
+        </span>
+        <h1 class="text-2xl font-extrabold text-white tracking-tight">Hisab-Cloud</h1>
+        <p class="text-xs text-slate-400 leading-relaxed">
+          Customizable expense & bill splitter for Student Hostels, PGs, Roommates, Trips & Families. Synced privately to your Google account.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-3 gap-2 text-[11px] text-slate-300 pt-1">
+        <div class="p-2.5 rounded-2xl bg-[#0b101d] border border-slate-800">
+          <i class="fa-solid fa-wand-magic-sparkles text-cyan-400 text-sm mb-1 block"></i>
+          AI Bill Scan
+        </div>
+        <div class="p-2.5 rounded-2xl bg-[#0b101d] border border-slate-800">
+          <i class="fa-solid fa-scale-balanced text-emerald-400 text-sm mb-1 block"></i>
+          Auto Split
+        </div>
+        <div class="p-2.5 rounded-2xl bg-[#0b101d] border border-slate-800">
+          <i class="fa-solid fa-file-pdf text-amber-400 text-sm mb-1 block"></i>
+          PDF & UPI
+        </div>
+      </div>
+
+      <button id="google-login-btn" type="button"
+        class="w-full py-3.5 px-5 rounded-2xl bg-white hover:bg-slate-100 active:scale-[0.99] text-slate-950 font-bold text-sm flex items-center justify-center gap-3 shadow-xl transition">
+        <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" class="w-5 h-5" />
+        <span>Continue with Google</span>
+      </button>
+
+      <p id="auth-error-msg" class="hidden text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl p-2.5"></p>
+    </div>
+  </div>
+
+  <!-- ==================== 2. MAIN APP SHELL ==================== -->
+  <div id="app-shell" class="hidden flex-1 flex flex-col max-w-2xl w-full mx-auto pb-24">
+
+    <!-- Top Header -->
+    <header class="sticky top-0 z-30 bg-[#070a12]/90 backdrop-blur-xl border-b border-slate-800/80 px-4 py-3 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center text-slate-950 font-bold shrink-0">
+          <i class="fa-solid fa-wallet"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-1.5">
+            <select id="workspace-select" class="bg-transparent text-sm font-bold text-white focus:outline-none truncate max-w-[165px]">
+            </select>
+            <button id="new-workspace-btn" title="Create New Workspace" class="w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-cyan-300 hover:text-white text-xs flex items-center justify-center transition">
+              <i class="fa-solid fa-plus"></i>
+            </button>
+          </div>
+          <p id="workspace-subtitle" class="text-[10px] text-slate-400 truncate">Cloud Synced • Private</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="export-pdf-btn" title="Download PDF Report" class="px-2.5 py-1.5 rounded-xl bg-[#11182b] hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-amber-300 flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-file-pdf"></i><span class="hidden sm:inline">PDF</span>
+        </button>
+        <button id="share-whatsapp-btn" title="Share Summary on WhatsApp" class="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition">
+          <i class="fa-brands fa-whatsapp text-sm"></i>
+        </button>
+        <button id="logout-btn" title="Sign Out" class="w-8 h-8 rounded-xl bg-[#11182b] hover:bg-red-500/20 border border-slate-800 text-slate-400 hover:text-red-400 text-xs flex items-center justify-center transition">
+          <i class="fa-solid fa-right-from-bracket"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Summary Cards -->
+    <section class="px-4 pt-4 grid grid-cols-3 gap-2.5">
+      <div class="glass-card rounded-2xl p-3.5">
+        <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Total Spent</p>
+        <p id="stat-total-spent" class="text-lg font-extrabold text-white mt-0.5">₹0</p>
+      </div>
+      <div class="glass-card rounded-2xl p-3.5">
+        <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Per Head Avg</p>
+        <p id="stat-per-head" class="text-lg font-extrabold text-cyan-400 mt-0.5">₹0</p>
+      </div>
+      <div class="glass-card rounded-2xl p-3.5">
+        <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Members</p>
+        <p id="stat-member-count" class="text-lg font-extrabold text-emerald-400 mt-0.5">0</p>
+      </div>
+    </section>
+
+    <!-- Gemini AI Smart Bar (Natural Language + Receipt Scanner) -->
+    <section class="px-4 pt-3.5">
+      <div class="rounded-2xl bg-gradient-to-r from-blue-600/15 via-cyan-500/10 to-purple-600/15 border border-cyan-500/30 p-3 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-bold text-cyan-300 flex items-center gap-1.5">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Gemini AI Quick Entry & Bill Scanner
+          </span>
+          <button id="ai-audit-btn" type="button" class="px-2.5 py-1 rounded-lg bg-cyan-400/20 hover:bg-cyan-400/30 text-cyan-200 text-[10px] font-bold transition">
+            <i class="fa-solid fa-chart-pie mr-1"></i>AI Audit
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <input id="ai-smart-input" type="text" placeholder='e.g. "Rohan paid 420 for chicken & rice"'
+            class="flex-1 bg-[#080c16] border border-slate-700/80 focus:border-cyan-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none" />
+          <label for="ai-receipt-input" title="Scan Receipt Photo" class="w-9 h-9 rounded-xl bg-[#12192c] hover:bg-slate-800 border border-slate-700 text-cyan-300 flex items-center justify-center cursor-pointer shrink-0 transition">
+            <i class="fa-solid fa-camera"></i>
+          </label>
+          <input id="ai-receipt-input" type="file" accept="image/*" class="hidden" />
+          <button id="ai-parse-btn" type="button" class="px-3.5 py-2 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs shrink-0 transition">
+            Add
+          </button>
+        </div>
+        <p id="ai-status-line" class="hidden text-[11px] text-cyan-200 bg-black/30 rounded-xl p-2.5 leading-relaxed"></p>
+      </div>
+    </section>
+
+    <!-- Navigation Tabs -->
+    <nav class="px-4 pt-3.5">
+      <div class="grid grid-cols-3 gap-1.5 p-1 rounded-2xl bg-[#0e1424] border border-slate-800 text-xs font-semibold">
+        <button data-tab="expenses" class="nav-tab py-2 rounded-xl bg-blue-600 text-white transition">Expenses</button>
+        <button data-tab="split" class="nav-tab py-2 rounded-xl text-slate-400 hover:text-white transition">Smart Split</button>
+        <button data-tab="customize" class="nav-tab py-2 rounded-xl text-slate-400 hover:text-white transition">Customize</button>
+      </div>
+    </nav>
+
+    <!-- ==================== TAB 1: EXPENSES LIST ==================== -->
+    <main id="tab-expenses" class="tab-panel px-4 pt-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400">Recent Transactions</h2>
+        <button id="open-manual-expense-btn" class="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-plus"></i> Manual Entry
+        </button>
+      </div>
+      <div id="expenses-list" class="space-y-2.5"></div>
+    </main>
+
+    <!-- ==================== TAB 2: SMART SPLIT & SETTLEMENT ==================== -->
+    <main id="tab-split" class="tab-panel hidden px-4 pt-4 space-y-4">
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-cyan-400">Member Balances</h2>
+        <div id="member-balances-list" class="space-y-2"></div>
+      </div>
+
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-emerald-400">Who Pays Whom (Minimum Transfers)</h2>
+        </div>
+        <div id="settlements-list" class="space-y-2.5"></div>
+      </div>
+    </main>
+
+    <!-- ==================== TAB 3: CUSTOMIZE WORKSPACE (MEMBERS, CATEGORIES, UPI) ==================== -->
+    <main id="tab-customize" class="tab-panel hidden px-4 pt-4 space-y-4">
+      <!-- Workspace Info & UPI -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-cyan-400">Workspace Settings</h3>
+        <div class="space-y-2.5">
+          <div>
+            <label class="text-[11px] text-slate-400 block mb-1">Workspace Name (Mess / Flat / Trip / Home)</label>
+            <input id="custom-ws-name" type="text" class="w-full px-3.5 py-2 rounded-xl bg-[#080c16] border border-slate-700 text-xs text-white focus:outline-none focus:border-cyan-400" />
+          </div>
+          <div>
+            <label class="text-[11px] text-slate-400 block mb-1">Your UPI ID (For Direct 1-Tap Settlement)</label>
+            <input id="custom-ws-upi" type="text" placeholder="e.g. ayan@okaxis" class="w-full px-3.5 py-2 rounded-xl bg-[#080c16] border border-slate-700 text-xs text-white focus:outline-none focus:border-cyan-400" />
+          </div>
+          <button id="save-ws-settings-btn" type="button" class="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition">
+            Save Workspace Details
+          </button>
+        </div>
+      </div>
+
+      <!-- Custom Members -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-400">Manage Members</h3>
+        <div class="flex gap-2">
+          <input id="new-member-input" type="text" placeholder="Add member name..." class="flex-1 px-3.5 py-2 rounded-xl bg-[#080c16] border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-400" />
+          <button id="add-member-btn" type="button" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition">Add</button>
+        </div>
+        <div id="custom-members-list" class="flex flex-wrap gap-2"></div>
+      </div>
+
+      <!-- Custom Categories -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400">Custom Expense Categories</h3>
+        <div class="flex gap-2">
+          <input id="new-category-input" type="text" placeholder="e.g. Mess Meal, Electricity, Fuel..." class="flex-1 px-3.5 py-2 rounded-xl bg-[#080c16] border border-slate-700 text-xs text-white focus:outline-none focus:border-amber-400" />
+          <button id="add-category-btn" type="button" class="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold transition">Add</button>
+        </div>
+        <div id="custom-categories-list" class="flex flex-wrap gap-2"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ==================== MANUAL EXPENSE MODAL ==================== -->
+  <div id="expense-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="w-full max-w-sm glass-card rounded-3xl p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 id="expense-modal-title" class="text-sm font-bold text-white">Add Expense</h3>
+        <button id="close-expense-modal" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="text-slate-400 block mb-1">Description / Item</label>
+          <input id="exp-title-input" type="text" placeholder="e.g. Groceries, Wi-Fi Bill, Dinner" class="w-full px-3.5 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none focus:border-cyan-400" />
+        </div>
+        <div class="grid grid-cols-2 gap-2.5">
+          <div>
+            <label class="text-slate-400 block mb-1">Amount (₹)</label>
+            <input id="exp-amount-input" type="number" placeholder="0" class="w-full px-3.5 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none focus:border-cyan-400" />
+          </div>
+          <div>
+            <label class="text-slate-400 block mb-1">Category</label>
+            <select id="exp-category-select" class="w-full px-3 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none"></select>
+          </div>
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Paid By</label>
+          <select id="exp-paidby-select" class="w-full px-3.5 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none"></select>
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Split Between</label>
+          <div id="exp-split-checkboxes" class="flex flex-wrap gap-2 pt-1"></div>
+        </div>
+      </div>
+
+      <button id="save-expense-btn" type="button" class="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition">
+        Save Expense
+      </button>
+    </div>
+  </div>
+
+  <!-- ==================== NEW WORKSPACE MODAL ==================== -->
+  <div id="workspace-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="w-full max-w-sm glass-card rounded-3xl p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white">Create New Workspace</h3>
+        <button id="close-ws-modal" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="text-slate-400 block mb-1">Workspace Name</label>
+          <input id="ws-create-name" type="text" placeholder="e.g. Goa Trip, Flat 302, Hostel Mess" class="w-full px-3.5 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none focus:border-cyan-400" />
+        </div>
+        <div>
+          <label class="text-slate-400 block mb-1">Members (comma separated)</label>
+          <input id="ws-create-members" type="text" placeholder="e.g. Ayan, Rahul, Sourav" class="w-full px-3.5 py-2.5 rounded-xl bg-[#080c16] border border-slate-700 text-white focus:outline-none focus:border-cyan-400" />
+        </div>
+      </div>
+      <button id="create-ws-submit-btn" type="button" class="w-full py-3 rounded-2xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs transition">
+        Create Workspace
+      </button>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
