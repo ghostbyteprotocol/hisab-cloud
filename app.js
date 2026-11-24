@@ -1,4 +1,4 @@
-// app.js — HisabCloud Pro Engine (Custom Slots, Profile Photo, Gemini Vision & NLP, Smart Split, Charts & PDF)
+// app.js — HisabCloud Pro Engine (100% Custom Emerald-Dark Dropdowns & Modals, Smart Split, Gemini Vision & NLP, Charts & PDF)
 import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
@@ -23,7 +23,7 @@ import {
   writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-// ==================== TEMPLATES FOR INSTANT CUSTOMIZATION ====================
+// ==================== TEMPLATES ====================
 const WORKSPACE_TEMPLATES = {
   mess: {
     slots: ["Morning", "Noon", "Afternoon", "Night"],
@@ -63,6 +63,122 @@ const WORKSPACE_TEMPLATES = {
   }
 };
 
+const CURRENCY_OPTIONS = [
+  { value: "₹", label: "INR (₹)" },
+  { value: "$", label: "USD ($)" },
+  { value: "€", label: "EUR (€)" },
+  { value: "£", label: "GBP (£)" }
+];
+
+const TEMPLATE_OPTIONS = [
+  { value: "mess", label: "Hostel / Mess / Daily Meals" },
+  { value: "flat", label: "Shared Flat / Roommates" },
+  { value: "trip", label: "Group Trip / Tour" },
+  { value: "personal", label: "Personal / Home Budget" }
+];
+
+// ==================== CUSTOM WEBSITE-THEMED DROPDOWN ENGINE ====================
+const dropdownRegistry = {};
+
+function renderCustomDropdown(containerId, options, selectedValue, onChange, extraBtnClass = "") {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  const currentOpt = options.find((o) => String(o.value) === String(selectedValue)) || options[0] || { value: "", label: "Select" };
+  dropdownRegistry[containerId] = {
+    value: currentOpt.value,
+    options,
+    onChange,
+    extraBtnClass
+  };
+
+  container.innerHTML = `
+    <div class="c-dropdown" id="wrap-${containerId}">
+      <button type="button" class="c-dropdown-btn ${extraBtnClass}">
+        <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(currentOpt.label)}</span>
+        <span class="c-dropdown-arrow">▼</span>
+      </button>
+      <div class="c-dropdown-menu">
+        ${options
+          .map((opt) => {
+            const isSel = String(opt.value) === String(currentOpt.value);
+            return `<button type="button" class="c-dropdown-item ${isSel ? "selected" : ""}" data-val="${escapeHtml(String(opt.value))}">
+              <span>${escapeHtml(opt.label)}</span>
+              ${isSel ? `<span class="c-dropdown-check">✓</span>` : ""}
+            </button>`;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  const wrap = container.querySelector(".c-dropdown");
+  const triggerBtn = container.querySelector(".c-dropdown-btn");
+
+  triggerBtn.onclick = (e) => {
+    e.stopPropagation();
+    const wasOpen = wrap.classList.contains("open");
+    document.querySelectorAll(".c-dropdown.open").forEach((el) => el.classList.remove("open"));
+    if (!wasOpen) wrap.classList.add("open");
+  };
+
+  container.querySelectorAll(".c-dropdown-item").forEach((itemBtn) => {
+    itemBtn.onclick = (e) => {
+      e.stopPropagation();
+      const newVal = itemBtn.dataset.val;
+      wrap.classList.remove("open");
+      renderCustomDropdown(containerId, options, newVal, onChange, extraBtnClass);
+      if (onChange) onChange(newVal);
+    };
+  });
+}
+
+function getDropdownValue(containerId) {
+  return dropdownRegistry[containerId]?.value ?? "";
+}
+
+document.addEventListener("click", () => {
+  document.querySelectorAll(".c-dropdown.open").forEach((el) => el.classList.remove("open"));
+});
+
+// ==================== CUSTOM WEBSITE-THEMED CONFIRM & PROMPT DIALOG ====================
+function openCustomDialog({ title, message, showInput = false, defaultValue = "", okText = "Confirm", danger = false }) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("customDialogModal");
+    const titleEl = document.getElementById("cDlgTitle");
+    const msgEl = document.getElementById("cDlgMessage");
+    const inputWrap = document.getElementById("cDlgInputWrap");
+    const inputEl = document.getElementById("cDlgInput");
+    const okBtn = document.getElementById("cDlgOkBtn");
+    const cancelBtn = document.getElementById("cDlgCancelBtn");
+
+    titleEl.innerText = title;
+    titleEl.style.color = danger ? "var(--rose)" : "var(--primary)";
+    msgEl.innerText = message;
+    okBtn.innerText = okText;
+    okBtn.style.background = danger ? "var(--rose)" : "linear-gradient(135deg, #10b981, #059669)";
+    okBtn.style.color = danger ? "#fff" : "#050a0e";
+
+    if (showInput) {
+      inputWrap.classList.remove("hidden");
+      inputEl.value = defaultValue;
+    } else {
+      inputWrap.classList.add("hidden");
+    }
+
+    modal.classList.add("show");
+    if (showInput) setTimeout(() => inputEl.focus(), 60);
+
+    const cleanup = (result) => {
+      modal.classList.remove("show");
+      resolve(result);
+    };
+
+    cancelBtn.onclick = () => cleanup(null);
+    okBtn.onclick = () => cleanup(showInput ? inputEl.value : true);
+  });
+}
+
 // ==================== GLOBAL STATE ====================
 let currentUser = null;
 let userProfile = null;
@@ -79,6 +195,8 @@ let unsubEntries = null;
 let onboardAvatarDataUrl = "";
 let profModalAvatarDataUrl = "";
 let isEmailSignUp = true;
+let isCreatingAccount = false;
+let isCreatingWs = false;
 
 let catChartInstance = null;
 let trendChartInstance = null;
@@ -263,6 +381,9 @@ function openOnboarding(user) {
   onboardAvatarDataUrl = defaultPic;
   document.getElementById("onboardAvatarImg").src = defaultPic;
   document.getElementById("onboardFullName").value = user.displayName || "";
+
+  renderCustomDropdown("dd-onboardCurrency", CURRENCY_OPTIONS, "₹");
+  renderCustomDropdown("dd-onboardTemplate", TEMPLATE_OPTIONS, "mess");
 }
 
 document.getElementById("onboardAvatarFile").onchange = async (e) => {
@@ -274,10 +395,11 @@ document.getElementById("onboardAvatarFile").onchange = async (e) => {
 };
 
 document.getElementById("finishOnboardingBtn").onclick = async () => {
+  if (isCreatingAccount) return;
   const fullName = document.getElementById("onboardFullName").value.trim();
-  const currency = document.getElementById("onboardCurrency").value;
+  const currency = getDropdownValue("dd-onboardCurrency") || "₹";
   const wsName = document.getElementById("onboardWsName").value.trim();
-  const templateKey = document.getElementById("onboardTemplate").value;
+  const templateKey = getDropdownValue("dd-onboardTemplate") || "mess";
   const upiId = document.getElementById("onboardUpi").value.trim();
   const budgetLimit = Number(document.getElementById("onboardBudget").value) || 5000;
   const membersRaw = document.getElementById("onboardMembers").value.trim();
@@ -287,36 +409,49 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
     return;
   }
 
-  const extraMembers = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
-  const members = Array.from(new Set([fullName, ...extraMembers]));
-  const tpl = WORKSPACE_TEMPLATES[templateKey] || WORKSPACE_TEMPLATES.mess;
+  isCreatingAccount = true;
+  const btn = document.getElementById("finishOnboardingBtn");
+  btn.disabled = true;
+  btn.innerText = "Setting up account...";
 
-  userProfile = {
-    uid: currentUser.uid,
-    email: currentUser.email,
-    fullName,
-    currency,
-    upiId,
-    photoUrl: onboardAvatarDataUrl,
-    calcPin: "2007",
-    onboardingDone: true,
-    createdAt: serverTimestamp()
-  };
+  try {
+    const extraMembers = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
+    const members = Array.from(new Set([fullName, ...extraMembers]));
+    const tpl = WORKSPACE_TEMPLATES[templateKey] || WORKSPACE_TEMPLATES.mess;
 
-  await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
+    userProfile = {
+      uid: currentUser.uid,
+      email: currentUser.email,
+      fullName,
+      currency,
+      upiId,
+      photoUrl: onboardAvatarDataUrl,
+      calcPin: "2007",
+      onboardingDone: true,
+      createdAt: serverTimestamp()
+    };
 
-  await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
-    name: wsName,
-    slots: tpl.slots,
-    presets: tpl.presets,
-    members,
-    upiId,
-    budgetLimit,
-    createdAt: serverTimestamp()
-  });
+    await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
 
-  showToast("Account & Workspace Created!");
-  launchDashboard();
+    await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
+      name: wsName,
+      slots: tpl.slots,
+      presets: tpl.presets,
+      members,
+      upiId,
+      budgetLimit,
+      createdAt: serverTimestamp()
+    });
+
+    showToast("Account & Workspace Created!");
+    launchDashboard();
+  } catch (err) {
+    showToast("Setup failed: " + err.message, "error");
+  } finally {
+    isCreatingAccount = false;
+    btn.disabled = false;
+    btn.innerText = "Save Profile & Launch App →";
+  }
 };
 
 function launchDashboard() {
@@ -347,14 +482,14 @@ function getCurrency() {
   return userProfile?.currency || "₹";
 }
 
-// ==================== 4. PROFILE & ACCOUNT SETTINGS MODAL ====================
+// ==================== 4. PROFILE & SETTINGS MODAL ====================
 window.openProfileSettings = () => {
   if (!userProfile) return;
   profModalAvatarDataUrl = userProfile.photoUrl || "";
   document.getElementById("profModalAvatarImg").src = profModalAvatarDataUrl;
   document.getElementById("profModalEmail").innerText = currentUser.email || "";
   document.getElementById("profModalName").value = userProfile.fullName || "";
-  document.getElementById("profModalCurrency").value = userProfile.currency || "₹";
+  renderCustomDropdown("dd-profModalCurrency", CURRENCY_OPTIONS, userProfile.currency || "₹");
   document.getElementById("profModalUpi").value = userProfile.upiId || "";
   document.getElementById("profModalPin").value = userProfile.calcPin || "";
   document.getElementById("profModalGeminiKey").value = localStorage.getItem("hisabcloud_custom_gemini_key") || "";
@@ -377,7 +512,7 @@ document.getElementById("profModalAvatarFile").onchange = async (e) => {
 
 document.getElementById("saveProfileSettingsBtn").onclick = async () => {
   const fullName = document.getElementById("profModalName").value.trim() || userProfile.fullName;
-  const currency = document.getElementById("profModalCurrency").value;
+  const currency = getDropdownValue("dd-profModalCurrency") || "₹";
   const upiId = document.getElementById("profModalUpi").value.trim();
   const pinVal = document.getElementById("profModalPin").value.trim();
   const customGemini = document.getElementById("profModalGeminiKey").value.trim();
@@ -407,17 +542,36 @@ document.getElementById("saveProfileSettingsBtn").onclick = async () => {
 };
 
 document.getElementById("exportBackupJsonBtn").onclick = () => {
-  const backup = {
-    exportedAt: new Date().toISOString(),
-    profile: userProfile,
-    workspace: getActiveWorkspace(),
-    records: rawData
+  const ws = getActiveWorkspace();
+  const cleanRecords = rawData.map((r) => ({
+    date: r.date,
+    paidBy: r.paidBy,
+    splitBetween: r.splitBetween || ws?.members || [],
+    slotValues: r.slotValues || {},
+    other: r.other || "",
+    total: r.total
+  }));
+
+  const cleanExport = {
+    app: "HisabCloud Pro",
+    exportedAt: new Date().toLocaleString("en-IN"),
+    accountName: userProfile.fullName,
+    currency: userProfile.currency,
+    workspace: {
+      name: ws?.name,
+      members: ws?.members,
+      slots: ws?.slots,
+      budgetLimit: ws?.budgetLimit
+    },
+    records: cleanRecords
   };
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+
+  const blob = new Blob([JSON.stringify(cleanExport, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `HisabCloud_Backup_${getLocalTodayISO()}.json`;
+  a.download = `${(ws?.name || "HisabCloud").replace(/\s+/g, "_")}_CleanBackup.json`;
   a.click();
+  showToast("Clean backup downloaded!");
 };
 
 document.getElementById("signOutAccountBtn").onclick = async () => {
@@ -461,17 +615,21 @@ function getActiveWorkspace() {
 }
 
 function renderWorkspaceDropdown() {
-  const sel = document.getElementById("workspaceSelect");
-  sel.innerHTML = workspaces
-    .map((ws) => `<option value="${ws.id}">${escapeHtml(ws.name)}</option>`)
-    .join("");
-  sel.value = activeWorkspaceId;
+  const opts = workspaces.map((ws, idx) => ({
+    value: ws.id,
+    label: workspaces.filter((w) => w.name === ws.name).length > 1 ? `${ws.name} #${idx + 1}` : ws.name
+  }));
+  renderCustomDropdown(
+    "dd-workspaceSelect",
+    opts,
+    activeWorkspaceId,
+    (newWsId) => {
+      activeWorkspaceId = newWsId;
+      loadActiveWorkspace();
+    },
+    "topbar-ws-btn"
+  );
 }
-
-document.getElementById("workspaceSelect").onchange = (e) => {
-  activeWorkspaceId = e.target.value;
-  loadActiveWorkspace();
-};
 
 function loadActiveWorkspace() {
   const ws = getActiveWorkspace();
@@ -499,47 +657,84 @@ function loadActiveWorkspace() {
 
 // Create New Workspace Modal
 document.getElementById("openNewWsModalBtn").onclick = () => {
+  renderCustomDropdown("dd-newWsTemplateSelect", TEMPLATE_OPTIONS, "mess");
   document.getElementById("newWsModal").classList.add("show");
 };
 window.closeNewWsModal = () => {
   document.getElementById("newWsModal").classList.remove("show");
 };
 document.getElementById("createNewWsSubmitBtn").onclick = async () => {
+  if (isCreatingWs) return;
   const name = document.getElementById("newWsNameInput").value.trim();
-  const tplKey = document.getElementById("newWsTemplateSelect").value;
+  const tplKey = getDropdownValue("dd-newWsTemplateSelect") || "mess";
   const membersRaw = document.getElementById("newWsMembersInput").value.trim();
   if (!name) return showToast("Enter a workspace name", "error");
 
-  const extra = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
-  const members = Array.from(new Set([userProfile.fullName, ...extra]));
-  const tpl = WORKSPACE_TEMPLATES[tplKey] || WORKSPACE_TEMPLATES.mess;
+  isCreatingWs = true;
+  const btn = document.getElementById("createNewWsSubmitBtn");
+  btn.disabled = true;
+  btn.innerText = "Creating...";
 
-  const ref = await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
-    name,
-    slots: tpl.slots,
-    presets: tpl.presets,
-    members,
-    upiId: userProfile.upiId || "",
-    budgetLimit: 5000,
-    createdAt: serverTimestamp()
-  });
+  try {
+    const extra = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
+    const members = Array.from(new Set([userProfile.fullName, ...extra]));
+    const tpl = WORKSPACE_TEMPLATES[tplKey] || WORKSPACE_TEMPLATES.mess;
 
-  activeWorkspaceId = ref.id;
-  document.getElementById("newWsNameInput").value = "";
-  document.getElementById("newWsMembersInput").value = "";
-  window.closeNewWsModal();
-  showToast(`Created "${name}"`);
+    const ref = await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
+      name,
+      slots: tpl.slots,
+      presets: tpl.presets,
+      members,
+      upiId: userProfile.upiId || "",
+      budgetLimit: 5000,
+      createdAt: serverTimestamp()
+    });
+
+    activeWorkspaceId = ref.id;
+    document.getElementById("newWsNameInput").value = "";
+    document.getElementById("newWsMembersInput").value = "";
+    window.closeNewWsModal();
+    showToast(`Created "${name}"`);
+  } finally {
+    isCreatingWs = false;
+    btn.disabled = false;
+    btn.innerText = "Create Workspace";
+  }
 };
 
-// Render Customizable Entry Form Slots & Presets
+// Render Customizable Entry Form Slots, Presets & Split Pills
 function renderDynamicEntryForm(ws) {
   const slots = ws.slots || ["Morning", "Noon", "Afternoon", "Night"];
   const presets = ws.presets || [];
   const members = ws.members || [userProfile.fullName];
 
-  // Paid By dropdown
-  const paidSel = document.getElementById("entryPaidBy");
-  paidSel.innerHTML = members.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  const memberOpts = members.map((m) => ({ value: m, label: m }));
+  renderCustomDropdown("dd-entryPaidBy", memberOpts, members[0]);
+
+  // Split Between Member Pills
+  const splitSec = document.getElementById("entrySplitSection");
+  const splitPillsWrap = document.getElementById("entrySplitPills");
+  if (members.length > 1) {
+    splitSec.classList.remove("hidden");
+    splitPillsWrap.innerHTML = members
+      .map(
+        (m) => `<button type="button" class="split-pill active" data-member="${escapeHtml(m)}">✓ ${escapeHtml(m)}</button>`
+      )
+      .join("");
+    splitPillsWrap.querySelectorAll(".split-pill").forEach((pill) => {
+      pill.onclick = () => {
+        const activeCount = splitPillsWrap.querySelectorAll(".split-pill.active").length;
+        if (pill.classList.contains("active") && activeCount <= 1) {
+          return showToast("Select at least 1 member", "error");
+        }
+        pill.classList.toggle("active");
+        const mName = pill.dataset.member;
+        pill.innerText = pill.classList.contains("active") ? `✓ ${mName}` : mName;
+      };
+    });
+  } else {
+    splitSec.classList.add("hidden");
+  }
 
   // Quick Presets Chips
   const presetsBar = document.getElementById("quickPresetsBar");
@@ -584,7 +779,6 @@ function renderCustomizationTab(ws) {
   const presets = ws.presets || [];
   const members = ws.members || [];
 
-  // Custom Slots Chips
   const slotsWrap = document.getElementById("customSlotsChips");
   slotsWrap.innerHTML = "";
   slots.forEach((s, idx) => {
@@ -593,15 +787,20 @@ function renderCustomizationTab(ws) {
     chip.innerHTML = `${escapeHtml(s)} <button type="button" title="Remove">✕</button>`;
     chip.querySelector("button").onclick = async () => {
       if (slots.length <= 1) return showToast("Keep at least 1 slot", "error");
-      const updated = slots.filter((_, i) => i !== idx);
-      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { slots: updated });
+      const updatedSlots = slots.filter((_, i) => i !== idx);
+      const updatedPresets = presets
+        .filter((p) => p.slotIndex !== idx)
+        .map((p) => ({ ...p, slotIndex: p.slotIndex > idx ? p.slotIndex - 1 : p.slotIndex }));
+      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
+        slots: updatedSlots,
+        presets: updatedPresets
+      });
     };
     slotsWrap.appendChild(chip);
   });
 
-  // Preset Target Slot Selector & Chips
-  const targetSlotSel = document.getElementById("presetTargetSlot");
-  targetSlotSel.innerHTML = slots.map((s, idx) => `<option value="${idx}">${escapeHtml(s)}</option>`).join("");
+  const slotOpts = slots.map((s, idx) => ({ value: String(idx), label: s }));
+  renderCustomDropdown("dd-presetTargetSlot", slotOpts, "0");
 
   const presetsWrap = document.getElementById("customPresetsChips");
   presetsWrap.innerHTML = "";
@@ -617,7 +816,6 @@ function renderCustomizationTab(ws) {
     presetsWrap.appendChild(chip);
   });
 
-  // Members Chips
   const memWrap = document.getElementById("customMembersChips");
   memWrap.innerHTML = "";
   members.forEach((m) => {
@@ -649,7 +847,7 @@ document.getElementById("addSlotBtn").onclick = async () => {
 
 document.getElementById("addPresetBtn").onclick = async () => {
   const ws = getActiveWorkspace();
-  const slotIndex = Number(document.getElementById("presetTargetSlot").value) || 0;
+  const slotIndex = Number(getDropdownValue("dd-presetTargetSlot")) || 0;
   const val = document.getElementById("newPresetValue").value.trim();
   if (!ws || !val) return;
   document.getElementById("newPresetValue").value = "";
@@ -683,13 +881,19 @@ document.getElementById("saveWsInfoBtn").onclick = async () => {
 document.getElementById("deleteWsBtn").onclick = async () => {
   const ws = getActiveWorkspace();
   if (!ws || workspaces.length <= 1) return showToast("Cannot delete your only workspace", "error");
-  if (!confirm(`Delete "${ws.name}" permanently?`)) return;
+  const ok = await openCustomDialog({
+    title: "Delete Workspace",
+    message: `Are you sure you want to delete "${ws.name}" and all its entries permanently?`,
+    okText: "Delete",
+    danger: true
+  });
+  if (!ok) return;
   await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id));
   activeWorkspaceId = null;
   showToast("Workspace deleted");
 };
 
-// ==================== 6. SMART INPUT & ENTRY LOGIC (FROM POCKETLEDGER PRO) ====================
+// ==================== 6. SMART INPUT & ENTRY LOGIC ====================
 window.switchTab = (tabName, el) => {
   document.querySelectorAll(".tab-view").forEach((v) => v.classList.remove("active"));
   document.querySelectorAll(".nav-tab").forEach((t) => t.classList.remove("active"));
@@ -834,9 +1038,20 @@ window.loadEntryForSelectedDate = () => {
   const existing = rawData.find((r) => r.date === dateFormatted);
 
   const slots = ws.slots || [];
+  const members = ws.members || [userProfile.fullName];
+  const memberOpts = members.map((m) => ({ value: m, label: m }));
+
   if (existing) {
     activeEditDocId = existing.docId;
-    if (existing.paidBy) document.getElementById("entryPaidBy").value = existing.paidBy;
+    renderCustomDropdown("dd-entryPaidBy", memberOpts, existing.paidBy || members[0]);
+
+    const activeSplitSet = new Set(existing.splitBetween || members);
+    document.querySelectorAll("#entrySplitPills .split-pill").forEach((pill) => {
+      const m = pill.dataset.member;
+      const isOn = activeSplitSet.has(m);
+      pill.classList.toggle("active", isOn);
+      pill.innerText = isOn ? `✓ ${m}` : m;
+    });
 
     slots.forEach((slotName, idx) => {
       const inp = document.getElementById(`slot_input_${idx}`);
@@ -859,6 +1074,12 @@ window.loadEntryForSelectedDate = () => {
     saveBtn.classList.add("update-mode");
   } else {
     activeEditDocId = null;
+    renderCustomDropdown("dd-entryPaidBy", memberOpts, members[0]);
+    document.querySelectorAll("#entrySplitPills .split-pill").forEach((pill) => {
+      pill.classList.add("active");
+      pill.innerText = `✓ ${pill.dataset.member}`;
+    });
+
     slots.forEach((_, idx) => {
       const inp = document.getElementById(`slot_input_${idx}`);
       if (inp) inp.value = "";
@@ -879,7 +1100,12 @@ window.submitExpense = async () => {
   if (!ws || !isoDate) return showToast("Select a valid date", "error");
 
   const dateFormatted = formatDateWithDay(isoDate);
-  const paidBy = document.getElementById("entryPaidBy").value || ws.members[0];
+  const paidBy = getDropdownValue("dd-entryPaidBy") || ws.members[0];
+  const selectedSplitters = Array.from(document.querySelectorAll("#entrySplitPills .split-pill.active")).map(
+    (p) => p.dataset.member
+  );
+  const splitBetween = selectedSplitters.length > 0 ? selectedSplitters : ws.members;
+
   const slotValues = {};
   let slotSum = 0;
 
@@ -906,6 +1132,7 @@ window.submitExpense = async () => {
   const entryPayload = {
     date: dateFormatted,
     paidBy,
+    splitBetween,
     slotValues,
     other: otherData.text,
     total,
@@ -925,6 +1152,7 @@ window.submitExpense = async () => {
     showToast("Save failed: " + err.message, "error");
   } finally {
     btn.disabled = false;
+    window.loadEntryForSelectedDate();
   }
 };
 
@@ -994,6 +1222,7 @@ async function applyParsedAiExpense(parsed) {
   const payload = {
     date: dateFormatted,
     paidBy,
+    splitBetween: existing?.splitBetween || ws.members,
     slotValues,
     other: otherText,
     total,
@@ -1102,13 +1331,37 @@ window.openEdit = (docId) => {
   document.getElementById("editDocId").value = item.docId;
   document.getElementById("editDate").value = item.date;
 
-  const paidSel = document.getElementById("editPaidBy");
-  paidSel.innerHTML = (ws.members || []).map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-  if (item.paidBy) paidSel.value = item.paidBy;
+  const members = ws.members || [];
+  const memberOpts = members.map((m) => ({ value: m, label: m }));
+  renderCustomDropdown("dd-editPaidBy", memberOpts, item.paidBy || members[0]);
+
+  const editSplitSec = document.getElementById("editSplitSection");
+  const editSplitWrap = document.getElementById("editSplitPills");
+  if (members.length > 1) {
+    editSplitSec.classList.remove("hidden");
+    const activeSet = new Set(item.splitBetween || members);
+    editSplitWrap.innerHTML = members
+      .map((m) => {
+        const isOn = activeSet.has(m);
+        return `<button type="button" class="split-pill ${isOn ? "active" : ""}" data-member="${escapeHtml(m)}">${isOn ? `✓ ${escapeHtml(m)}` : escapeHtml(m)}</button>`;
+      })
+      .join("");
+    editSplitWrap.querySelectorAll(".split-pill").forEach((pill) => {
+      pill.onclick = () => {
+        const activeCount = editSplitWrap.querySelectorAll(".split-pill.active").length;
+        if (pill.classList.contains("active") && activeCount <= 1) return;
+        pill.classList.toggle("active");
+        const mName = pill.dataset.member;
+        pill.innerText = pill.classList.contains("active") ? `✓ ${mName}` : mName;
+      };
+    });
+  } else {
+    editSplitSec.classList.add("hidden");
+  }
 
   const grid = document.getElementById("editDynamicSlotsGrid");
   grid.innerHTML = "";
-  (ws.slots || []).forEach((slotName, idx) => {
+  (ws.slots || []).forEach((slotName) => {
     const val = item.slotValues?.[slotName] || "";
     const field = document.createElement("div");
     field.className = "field";
@@ -1144,7 +1397,12 @@ window.saveEdit = async () => {
   btn.innerText = "Updating...";
   btn.disabled = true;
 
-  const paidBy = document.getElementById("editPaidBy").value;
+  const paidBy = getDropdownValue("dd-editPaidBy") || ws.members[0];
+  const selectedSplitters = Array.from(document.querySelectorAll("#editSplitPills .split-pill.active")).map(
+    (p) => p.dataset.member
+  );
+  const splitBetween = selectedSplitters.length > 0 ? selectedSplitters : ws.members;
+
   const slotValues = {};
   let slotSum = 0;
 
@@ -1161,6 +1419,7 @@ window.saveEdit = async () => {
   try {
     await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", docId), {
       paidBy,
+      splitBetween,
       slotValues,
       other: otherData.text,
       total,
@@ -1178,14 +1437,28 @@ window.saveEdit = async () => {
 
 window.deleteSingleRow = async (docId) => {
   const ws = getActiveWorkspace();
-  if (!ws || !confirm("Delete this expense record permanently?")) return;
+  if (!ws) return;
+  const ok = await openCustomDialog({
+    title: "Delete Record",
+    message: "Delete this expense record permanently?",
+    okText: "Delete",
+    danger: true
+  });
+  if (!ok) return;
   await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", docId));
   showToast("Record deleted");
 };
 
 window.deleteCurrentWeek = async (docIds) => {
   const ws = getActiveWorkspace();
-  if (!ws || !confirm("Delete all records for this active week?")) return;
+  if (!ws) return;
+  const ok = await openCustomDialog({
+    title: "Delete Active Week",
+    message: `Delete all ${docIds.length} records in this active week?`,
+    okText: "Delete Week",
+    danger: true
+  });
+  if (!ok) return;
   const batch = writeBatch(db);
   docIds.forEach((id) => batch.delete(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", id)));
   await batch.commit();
@@ -1282,7 +1555,6 @@ function renderTable() {
   displayRows.sort((a, b) => parseEntryDate(a.date) - parseEntryDate(b.date));
   currentActiveRows = displayRows;
 
-  // Month Total & Budget Bar
   const now = new Date();
   const monthTotal = rawData.reduce((acc, r) => {
     const d = parseEntryDate(r.date);
@@ -1347,7 +1619,7 @@ function updateStats(total, count, ws) {
   document.getElementById("statPerMember").innerText = `${cur}${Math.round(total / memCount)}`;
 }
 
-// Smart Split & UPI QR Engine
+// Per-Entry Smart Split & UPI QR Engine
 function renderSmartSplit(ws, rows) {
   const cur = getCurrency();
   const members = ws.members || [];
@@ -1355,23 +1627,33 @@ function renderSmartSplit(ws, rows) {
   const transWrap = document.getElementById("settlementTransfersWrap");
 
   const paidByMember = {};
-  members.forEach((m) => (paidByMember[m] = 0));
-
-  let totalWeek = 0;
-  rows.forEach((r) => {
-    const amt = Number(r.total) || 0;
-    totalWeek += amt;
-    const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
-    if (payer) paidByMember[payer] += amt;
+  const netBalances = {};
+  members.forEach((m) => {
+    paidByMember[m] = 0;
+    netBalances[m] = 0;
   });
 
-  const fairShare = members.length > 0 ? totalWeek / members.length : 0;
-  const netBalances = {};
+  rows.forEach((r) => {
+    const amt = Number(r.total) || 0;
+    const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
+    if (payer) {
+      paidByMember[payer] += amt;
+      netBalances[payer] += amt;
+    }
+
+    const validSplitters = (r.splitBetween || members).filter((m) =>
+      Object.prototype.hasOwnProperty.call(netBalances, m)
+    );
+    const activeSplitters = validSplitters.length > 0 ? validSplitters : members;
+    if (activeSplitters.length > 0) {
+      const share = amt / activeSplitters.length;
+      activeSplitters.forEach((s) => (netBalances[s] -= share));
+    }
+  });
 
   balWrap.innerHTML = "";
   members.forEach((m) => {
-    const net = paidByMember[m] - fairShare;
-    netBalances[m] = net;
+    const net = netBalances[m];
     const row = document.createElement("div");
     row.className = "split-row";
     row.innerHTML = `
@@ -1386,7 +1668,6 @@ function renderSmartSplit(ws, rows) {
     balWrap.appendChild(row);
   });
 
-  // Minimum Transfers
   const debtors = [];
   const creditors = [];
   Object.entries(netBalances).forEach(([person, amt]) => {
@@ -1450,7 +1731,13 @@ function renderSmartSplit(ws, rows) {
 window.setMonthlyBudget = async () => {
   const ws = getActiveWorkspace();
   if (!ws) return;
-  const val = prompt(`Enter Monthly Budget Limit (${getCurrency()}):`, ws.budgetLimit || 5000);
+  const val = await openCustomDialog({
+    title: "Monthly Budget Limit",
+    message: `Set your target monthly spending limit (${getCurrency()}):`,
+    showInput: true,
+    defaultValue: String(ws.budgetLimit || 5000),
+    okText: "Save Limit"
+  });
   if (val && !isNaN(val) && Number(val) > 0) {
     await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { budgetLimit: Number(val) });
     showToast(`Monthly budget set to ${getCurrency()}${val}`);

@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -21,6 +22,7 @@
       --rose: #f43f5e;
       --text: #f1f5f9;
       --muted: #8ca0b3;
+      color-scheme: dark;
     }
 
     * { box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
@@ -35,6 +37,49 @@
     }
     .container { max-width: 820px; margin: 0 auto; }
     .hidden { display: none !important; }
+
+    /* ================= CUSTOM WEBSITE-THEMED DROPDOWN ================= */
+    .c-dropdown { position: relative; width: 100%; }
+    .c-dropdown-btn {
+      width: 100%; padding: 11px 13px; border-radius: 13px;
+      border: 1px solid var(--border); background: var(--surface-2);
+      color: var(--text); font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      cursor: pointer; text-align: left; transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .c-dropdown-btn:hover, .c-dropdown.open .c-dropdown-btn {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+    }
+    .c-dropdown-btn.topbar-ws-btn {
+      padding: 5px 10px; border-radius: 10px; font-family: 'Space Grotesk', sans-serif;
+      font-size: 15px; font-weight: 700; background: rgba(20, 35, 45, 0.75);
+      border-color: rgba(16, 185, 129, 0.25); max-width: 175px;
+    }
+    .c-dropdown-arrow {
+      color: var(--primary); font-size: 11px; transition: transform 0.2s ease; flex-shrink: 0;
+    }
+    .c-dropdown.open .c-dropdown-arrow { transform: rotate(180deg); }
+    .c-dropdown-menu {
+      position: absolute; top: calc(100% + 6px); left: 0; right: 0; min-width: 170px;
+      background: #0d171e; border: 1px solid rgba(16, 185, 129, 0.35);
+      border-radius: 15px; padding: 5px; z-index: 9995;
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.88);
+      max-height: 220px; overflow-y: auto; display: none;
+    }
+    .c-dropdown.open .c-dropdown-menu { display: block; animation: dropFade 0.15s ease; }
+    @keyframes dropFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .c-dropdown-item {
+      width: 100%; padding: 10px 12px; border-radius: 10px; border: none;
+      background: transparent; color: var(--text); font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      cursor: pointer; text-align: left; transition: background 0.15s;
+    }
+    .c-dropdown-item:hover { background: rgba(255, 255, 255, 0.06); }
+    .c-dropdown-item.selected {
+      background: rgba(16, 185, 129, 0.18); color: var(--primary); font-weight: 700;
+    }
+    .c-dropdown-check { color: var(--primary); font-size: 12px; font-weight: 800; }
 
     /* ================= AUTH & ONBOARDING OVERLAYS ================= */
     .full-overlay {
@@ -116,7 +161,7 @@
     /* Top App Bar */
     .topbar {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 10px 14px; background: rgba(13, 23, 30, 0.92);
+      padding: 10px 14px; background: rgba(13, 23, 30, 0.94);
       backdrop-filter: blur(14px); border: 1px solid var(--border);
       border-radius: 20px; margin-bottom: 14px; position: sticky; top: 10px; z-index: 50;
       gap: 8px;
@@ -124,17 +169,11 @@
     .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .profile-avatar-btn {
       width: 40px; height: 40px; border-radius: 50%; padding: 0; border: 2px solid var(--primary);
-      background: var(--surface-2); overflow: hidden; cursor: pointer; shrink: 0; flex-shrink: 0;
+      background: var(--surface-2); overflow: hidden; cursor: pointer; flex-shrink: 0;
     }
     .profile-avatar-btn img { width: 100%; height: 100%; object-fit: cover; }
     .ws-switcher-row { display: flex; align-items: center; gap: 6px; }
-    .ws-select {
-      background: transparent; border: none; color: var(--text);
-      font-family: 'Space Grotesk', sans-serif; font-size: 15px; font-weight: 700;
-      outline: none; max-width: 155px; text-overflow: ellipsis; cursor: pointer;
-    }
-    .ws-select option { background: #0d171e; color: #f1f5f9; }
-    .app-sub { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .app-sub { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
     .top-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
     .icon-pill {
       background: rgba(255, 255, 255, 0.06); border: 1px solid var(--border);
@@ -191,7 +230,7 @@
     }
     .ai-status {
       margin-top: 10px; padding: 10px 12px; border-radius: 12px;
-      background: rgba(5, 10, 14, 0.7); border: 1px solid rgba(6, 182, 212, 0.25);
+      background: rgba(5, 10, 14, 0.78); border: 1px solid rgba(6, 182, 212, 0.25);
       font-size: 12px; color: #a5f3fc; line-height: 1.45;
     }
 
@@ -215,13 +254,24 @@
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .field { margin-bottom: 11px; }
     label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
-    input, select {
+    input {
       width: 100%; padding: 11px 13px; border-radius: 13px;
       border: 1px solid var(--border); background: var(--surface-2);
       color: var(--text); font-size: 13px; outline: none; transition: 0.2s;
     }
-    input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
+    input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
     input::placeholder { color: #54697a; }
+
+    /* Split Member Toggle Pills */
+    .split-toggle-wrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .split-pill {
+      padding: 6px 11px; border-radius: 99px; font-size: 11px; font-weight: 700;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+      cursor: pointer; transition: 0.15s;
+    }
+    .split-pill.active {
+      background: rgba(16, 185, 129, 0.18); border-color: rgba(16, 185, 129, 0.45); color: var(--primary);
+    }
 
     .other-row { display: flex; gap: 8px; margin-bottom: 8px; }
     .btn-ghost {
@@ -305,7 +355,7 @@
       border: 1px solid var(--border); margin-bottom: 8px; font-size: 12px;
     }
 
-    /* Bottom Navigation Bar (4 Tabs) */
+    /* Bottom Navigation Bar */
     .bottom-nav {
       position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
       width: calc(100% - 28px); max-width: 500px;
@@ -325,12 +375,13 @@
     /* Modals */
     .modal-overlay {
       display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85);
-      backdrop-filter: blur(8px); z-index: 9999; justify-content: center; align-items: center; padding: 16px;
+      backdrop-filter: blur(8px); z-index: 9990; justify-content: center; align-items: center; padding: 16px;
     }
     .modal-overlay.show { display: flex; }
     .modal-box {
-      background: var(--surface); border: 1px solid var(--border); width: 100%;
+      background: var(--surface); border: 1px solid rgba(16, 185, 129, 0.25); width: 100%;
       max-width: 450px; border-radius: 24px; padding: 22px; max-height: 90vh; overflow-y: auto;
+      box-shadow: 0 24px 55px rgba(0,0,0,0.85);
     }
 
     #toast {
@@ -408,12 +459,7 @@
       </div>
       <div class="field">
         <label>Currency Symbol</label>
-        <select id="onboardCurrency">
-          <option value="₹">INR (₹)</option>
-          <option value="$">USD ($)</option>
-          <option value="€">EUR (€)</option>
-          <option value="£">GBP (£)</option>
-        </select>
+        <div id="dd-onboardCurrency"></div>
       </div>
     </div>
 
@@ -424,12 +470,7 @@
       </div>
       <div class="field">
         <label>Ready Template</label>
-        <select id="onboardTemplate">
-          <option value="mess">Hostel / Mess / Daily Meals</option>
-          <option value="flat">Shared Flat / Roommates</option>
-          <option value="trip">Group Trip / Tour</option>
-          <option value="personal">Personal / Home Budget</option>
-        </select>
+        <div id="dd-onboardTemplate"></div>
       </div>
     </div>
 
@@ -445,7 +486,7 @@
     </div>
 
     <div class="field">
-      <label>Group Members (Comma separated — leave as is for solo)</label>
+      <label>Group Members (Comma separated — leave empty for solo)</label>
       <input type="text" id="onboardMembers" placeholder="e.g. Member 1, Member 2 (optional)" />
     </div>
 
@@ -504,8 +545,8 @@
       </button>
       <div style="min-width:0;">
         <div class="ws-switcher-row">
-          <select id="workspaceSelect" class="ws-select"></select>
-          <button type="button" class="icon-pill" id="openNewWsModalBtn" title="Create New Workspace" style="width:26px; height:26px; font-size:13px; border-radius:8px;">+</button>
+          <div id="dd-workspaceSelect"></div>
+          <button type="button" class="icon-pill" id="openNewWsModalBtn" title="Create New Workspace" style="width:28px; height:28px; font-size:14px; border-radius:9px; color:var(--primary); border-color:rgba(16,185,129,0.3);">+</button>
         </div>
         <div class="app-sub" id="topbarSubtitle">Cloud Synced • Private</div>
       </div>
@@ -583,8 +624,14 @@
         </div>
         <div class="field">
           <label>Paid By (Member)</label>
-          <select id="entryPaidBy"></select>
+          <div id="dd-entryPaidBy"></div>
         </div>
+      </div>
+
+      <!-- Split Between Members (Visible when 2+ members exist) -->
+      <div id="entrySplitSection" class="field hidden">
+        <label>Split Between</label>
+        <div id="entrySplitPills" class="split-toggle-wrap"></div>
       </div>
 
       <!-- Dynamic Customizable Slots Grid -->
@@ -683,7 +730,6 @@
 
   <!-- ==================== TAB 4: SMART SPLIT & CUSTOMIZE ==================== -->
   <div id="tab-customize" class="tab-view">
-    <!-- Auto Split & UPI Settlement -->
     <div class="card">
       <div class="card-title">
         <span>⚖️ Smart Split & Settlements</span>
@@ -696,7 +742,6 @@
       </div>
     </div>
 
-    <!-- Customize Entry Slots -->
     <div class="card">
       <div class="card-title">
         <span>🧩 Customize Entry Slots</span>
@@ -709,20 +754,18 @@
       <div class="chip-wrap" id="customSlotsChips"></div>
     </div>
 
-    <!-- Customize Quick Presets -->
     <div class="card">
       <div class="card-title">
         <span>⚡ Customize Quick Preset Buttons</span>
       </div>
       <div class="grid-2" style="margin-bottom:8px;">
-        <select id="presetTargetSlot"></select>
+        <div id="dd-presetTargetSlot"></div>
         <input type="text" id="newPresetValue" placeholder="e.g. 50 (Lunch)" />
       </div>
       <button type="button" id="addPresetBtn" class="btn-ghost" style="width:100%;">+ Add Quick Preset Chip</button>
       <div class="chip-wrap" id="customPresetsChips"></div>
     </div>
 
-    <!-- Manage Members -->
     <div class="card">
       <div class="card-title">
         <span>👥 Manage Members</span>
@@ -734,7 +777,6 @@
       <div class="chip-wrap" id="customMembersChips"></div>
     </div>
 
-    <!-- Workspace Settings -->
     <div class="card">
       <div class="card-title"><span>⚙️ Workspace Settings</span></div>
       <div class="grid-2">
@@ -799,12 +841,7 @@
       </div>
       <div class="field">
         <label>Currency Symbol</label>
-        <select id="profModalCurrency">
-          <option value="₹">INR (₹)</option>
-          <option value="$">USD ($)</option>
-          <option value="€">EUR (€)</option>
-          <option value="£">GBP (£)</option>
-        </select>
+        <div id="dd-profModalCurrency"></div>
       </div>
     </div>
 
@@ -827,7 +864,7 @@
     <button type="button" id="saveProfileSettingsBtn" class="btn-primary" style="width:100%; margin-bottom:10px;">Save Profile Changes</button>
 
     <div class="grid-2">
-      <button type="button" id="exportBackupJsonBtn" class="btn-ghost" style="padding:11px;">📥 Backup JSON</button>
+      <button type="button" id="exportBackupJsonBtn" class="btn-ghost" style="padding:11px;">📥 Export Clean Data</button>
       <button type="button" id="signOutAccountBtn" class="btn-del-wk" style="padding:11px;">🚪 Sign Out</button>
     </div>
   </div>
@@ -846,12 +883,7 @@
     </div>
     <div class="field">
       <label>Template Preset</label>
-      <select id="newWsTemplateSelect">
-        <option value="mess">Hostel / Mess / Daily Meals</option>
-        <option value="flat">Shared Flat / Roommates</option>
-        <option value="trip">Group Trip / Tour</option>
-        <option value="personal">Personal / Home Budget</option>
-      </select>
+      <div id="dd-newWsTemplateSelect"></div>
     </div>
     <div class="field">
       <label>Members (Comma separated)</label>
@@ -877,8 +909,13 @@
       </div>
       <div class="field">
         <label>Paid By</label>
-        <select id="editPaidBy"></select>
+        <div id="dd-editPaidBy"></div>
       </div>
+    </div>
+
+    <div id="editSplitSection" class="field hidden">
+      <label>Split Between</label>
+      <div id="editSplitPills" class="split-toggle-wrap"></div>
     </div>
 
     <div class="grid-2" id="editDynamicSlotsGrid"></div>
@@ -908,6 +945,21 @@
     </div>
     <p id="qrModalUpiLabel" style="font-size:12px; color:var(--cyan); font-weight:700; margin-top:6px;"></p>
     <p style="font-size:11px; color:var(--muted); margin-top:4px;">Scan with GPay, PhonePe, Paytm or Navi</p>
+  </div>
+</div>
+
+<!-- ==================== 9. CUSTOM THEMED DIALOG (REPLACES CONFIRM/PROMPT) ==================== -->
+<div id="customDialogModal" class="modal-overlay" style="z-index:9998;">
+  <div class="modal-box" style="max-width:360px;">
+    <div class="card-title" id="cDlgTitle" style="color:var(--primary);">Confirm</div>
+    <p id="cDlgMessage" style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:14px;"></p>
+    <div id="cDlgInputWrap" class="field hidden">
+      <input type="number" id="cDlgInput" placeholder="Enter value..." />
+    </div>
+    <div class="grid-2">
+      <button type="button" id="cDlgCancelBtn" class="btn-ghost" style="padding:11px;">Cancel</button>
+      <button type="button" id="cDlgOkBtn" class="btn-primary" style="padding:11px;">Confirm</button>
+    </div>
   </div>
 </div>
 
