@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>HisabCloud Pro — AI Smart Ledger & Split</title>
+  <link rel="icon" type="image/png" href="logo.png" />
+  <link rel="apple-touch-icon" href="logo.png" />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -489,7 +491,7 @@
 <div id="authScreen" class="full-overlay hidden">
   <div class="auth-card">
     <div style="text-align:center; margin-bottom:20px;">
-      <div style="width:58px; height:58px; margin:0 auto 12px; border-radius:18px; background:linear-gradient(135deg,#10b981,#06b6d4); display:flex; align-items:center; justify-content:center; font-size:28px; color:#050a0e; font-weight:800;">💼</div>
+      <img src="logo.png" alt="Logo" onerror="this.style.display='none'" style="width:64px; height:64px; margin:0 auto 10px; border-radius:18px; display:block; box-shadow:0 8px 24px rgba(16,185,129,0.28);" />
       <h1 style="font-family:'Space Grotesk',sans-serif; font-size:24px; font-weight:700;">HisabCloud Pro</h1>
       <p style="font-size:12px; color:var(--muted); margin-top:4px;">Smart Customizable Ledger & Group Split Cloud</p>
     </div>
@@ -1018,6 +1020,12 @@
       <button type="button" id="signOutAccountBtn" class="btn-ghost" style="padding:11px;">🚪 Sign Out</button>
     </div>
 
+    <div style="text-align:center; margin-top:12px;">
+      <button type="button" id="manualCheckUpdateBtn" style="background:none; border:none; color:var(--muted); font-size:11px; font-weight:600; cursor:pointer;">
+        App Version <span id="currentAppVersionLabel">v1.0.1</span> • Tap to Check for Updates
+      </button>
+    </div>
+
     <div class="danger-zone">
       <div style="font-size:12px; font-weight:800; color:var(--rose); margin-bottom:4px;">⚠️ Danger Zone</div>
       <p style="font-size:11px; color:var(--muted); margin-bottom:10px;">Permanently wipe all workspaces, ledger records, and profile data from the cloud.</p>
@@ -1028,7 +1036,25 @@
   </div>
 </div>
 
-<!-- ==================== 6. VERIFIED CALCULATOR PIN RESET MODAL ==================== -->
+<!-- ==================== 6. AUTO-UPDATE AVAILABLE MODAL ==================== -->
+<div id="appUpdateModal" class="modal-overlay" style="z-index:9996;">
+  <div class="modal-box" style="max-width:390px; border-color:rgba(16,185,129,0.5); text-align:center;">
+    <img src="logo.png" alt="Update" onerror="this.style.display='none'" style="width:60px; height:60px; margin:0 auto 10px; border-radius:16px; display:block;" />
+    <div style="font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--primary); font-weight:800;">New Version Released</div>
+    <h3 id="updateVersionTitle" style="font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; margin-top:3px;">HisabCloud Pro Update</h3>
+    <p id="updateReleaseNotes" style="font-size:12px; color:var(--muted); line-height:1.5; margin:10px 0 16px;">
+      A newer version of HisabCloud Pro is available with new features and improvements. Download and install the latest APK now.
+    </p>
+    <a id="updateDownloadLink" href="#" target="_blank" class="btn-primary" style="display:block; width:100%; text-decoration:none; padding:13px; margin-bottom:8px;">
+      ⬇️ Download & Install New APK
+    </a>
+    <button type="button" onclick="document.getElementById('appUpdateModal').classList.remove('show')" class="btn-ghost" style="width:100%; padding:10px;">
+      Later
+    </button>
+  </div>
+</div>
+
+<!-- ==================== 7. VERIFIED CALCULATOR PIN RESET MODAL ==================== -->
 <div id="pinResetModal" class="modal-overlay" style="z-index:9995;">
   <div class="modal-box" style="max-width:410px; border-color:rgba(6,182,212,0.4);">
     <div class="card-title" style="color:var(--cyan);">
@@ -1086,7 +1112,7 @@
   </div>
 </div>
 
-<!-- ==================== 7. FORGOT PASSWORD MODAL ==================== -->
+<!-- ==================== 8. FORGOT PASSWORD MODAL ==================== -->
 <div id="forgotPwdModal" class="modal-overlay" style="z-index:9995;">
   <div class="modal-box" style="max-width:380px;">
     <div class="card-title" style="color:var(--amber);">
@@ -1106,7 +1132,7 @@
   </div>
 </div>
 
-<!-- ==================== 8. HIGH-FRICTION DELETE ALL DATA MODAL ==================== -->
+<!-- ==================== 9. HIGH-FRICTION DELETE ALL DATA MODAL ==================== -->
 <div id="deleteAllDataModal" class="modal-overlay" style="z-index:9999;">
   <div class="modal-box" style="max-width:400px; border-color:rgba(244,63,94,0.5);">
     <div class="card-title" style="color:var(--rose);">
@@ -1137,7 +1163,7 @@
   </div>
 </div>
 
-<!-- ==================== 9. CREATE NEW WORKSPACE MODAL ==================== -->
+<!-- ==================== 10. CREATE NEW WORKSPACE MODAL ==================== -->
 <div id="newWsModal" class="modal-overlay">
   <div class="modal-box">
     <div class="card-title" style="color:var(--cyan);">
@@ -1160,7 +1186,7 @@
   </div>
 </div>
 
-<!-- ==================== 10. EDIT RECORD MODAL ==================== -->
+<!-- ==================== 11. EDIT RECORD MODAL ==================== -->
 <div id="editModal" class="modal-overlay">
   <div class="modal-box">
     <div class="card-title" style="color:var(--primary);">
@@ -1200,7 +1226,7 @@
   </div>
 </div>
 
-<!-- ==================== 11. UPI QR CODE MODAL ==================== -->
+<!-- ==================== 12. UPI QR CODE MODAL ==================== -->
 <div id="qrModal" class="modal-overlay">
   <div class="modal-box" style="max-width:340px; text-align:center;">
     <div class="card-title" style="color:var(--primary);">
@@ -1215,7 +1241,7 @@
   </div>
 </div>
 
-<!-- ==================== 12. CUSTOM THEMED DIALOG ==================== -->
+<!-- ==================== 13. CUSTOM THEMED DIALOG ==================== -->
 <div id="customDialogModal" class="modal-overlay" style="z-index:9998;">
   <div class="modal-box" style="max-width:360px;">
     <div class="card-title" id="cDlgTitle" style="color:var(--primary);">Confirm</div>
@@ -1232,6 +1258,6 @@
 
 <div id="toast"></div>
 
-<script type="module" src="app.js?v=5"></script>
+<script type="module" src="app.js?v=6"></script>
 </body>
 </html>
