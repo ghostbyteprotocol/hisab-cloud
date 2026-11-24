@@ -1,4 +1,4 @@
-// app.js — HisabCloud Pro Engine (100% Custom Emerald-Dark Dropdowns & Modals, Smart Split, Gemini Vision & NLP, Charts & PDF)
+// app.js — HisabCloud Pro Engine (Persistent Auth, Ultra-Smart Gemini Receipt Filter & Q&A, Reset Customizations, CSV/PDF, 3-Step Wipe)
 import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
@@ -12,6 +12,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   addDoc,
   updateDoc,
@@ -84,7 +85,10 @@ function renderCustomDropdown(containerId, options, selectedValue, onChange, ext
   const container = document.getElementById(containerId);
   if (!container) return;
 
-  const currentOpt = options.find((o) => String(o.value) === String(selectedValue)) || options[0] || { value: "", label: "Select" };
+  const currentOpt =
+    options.find((o) => String(o.value) === String(selectedValue)) ||
+    options[0] || { value: "", label: "Select" };
+
   dropdownRegistry[containerId] = {
     value: currentOpt.value,
     options,
@@ -197,6 +201,7 @@ let profModalAvatarDataUrl = "";
 let isEmailSignUp = true;
 let isCreatingAccount = false;
 let isCreatingWs = false;
+let wipeCountdownTimer = null;
 
 let catChartInstance = null;
 let trendChartInstance = null;
@@ -216,7 +221,7 @@ function showToast(msg, type = "success") {
 }
 window.showToast = showToast;
 
-function compressImage(file, maxDim = 900, quality = 0.82) {
+function compressImage(file, maxDim = 960, quality = 0.84) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -301,7 +306,7 @@ window.toggleStealthBlur = () => {
   btn.innerText = isBlurred ? "🙈" : "👁️";
 };
 
-// ==================== 2. AUTHENTICATION (GOOGLE + EMAIL) ====================
+// ==================== 2. PERSISTENT AUTHENTICATION ====================
 const googleProvider = new GoogleAuthProvider();
 
 document.getElementById("googleSignInBtn").onclick = async () => {
@@ -352,8 +357,11 @@ document.getElementById("emailAuthForm").onsubmit = async (e) => {
 };
 
 onAuthStateChanged(auth, async (user) => {
+  const bootSplash = document.getElementById("bootSplash");
   currentUser = user;
+
   if (!user) {
+    if (bootSplash) bootSplash.classList.add("hidden");
     document.getElementById("authScreen").classList.remove("hidden");
     document.getElementById("onboardingScreen").classList.add("hidden");
     document.getElementById("mainAppContainer").classList.add("hidden");
@@ -361,16 +369,30 @@ onAuthStateChanged(auth, async (user) => {
     return;
   }
 
+  // Load cached profile immediately for zero-lag transition
+  try {
+    const cached = JSON.parse(localStorage.getItem(`hisab_prof_${user.uid}`) || "null");
+    if (cached && cached.onboardingDone) {
+      userProfile = cached;
+      if (bootSplash) bootSplash.classList.add("hidden");
+      launchDashboard();
+    }
+  } catch (e) {}
+
   const profileSnap = await getDoc(doc(db, "users", user.uid));
+  if (bootSplash) bootSplash.classList.add("hidden");
+
   if (!profileSnap.exists() || !profileSnap.data().onboardingDone) {
     openOnboarding(user);
   } else {
     userProfile = profileSnap.data();
+    localStorage.setItem(`hisab_prof_${user.uid}`, JSON.stringify(userProfile));
+    localStorage.setItem("hisabcloud_pin", userProfile.calcPin || "2007");
     launchDashboard();
   }
 });
 
-// ==================== 3. REAL ACCOUNT PROFILE SETUP (ONBOARDING) ====================
+// ==================== 3. ACCOUNT PROFILE SETUP (ONBOARDING WITH CUSTOM PIN) ====================
 function openOnboarding(user) {
   document.getElementById("authScreen").classList.add("hidden");
   document.getElementById("mainAppContainer").classList.add("hidden");
@@ -397,6 +419,7 @@ document.getElementById("onboardAvatarFile").onchange = async (e) => {
 document.getElementById("finishOnboardingBtn").onclick = async () => {
   if (isCreatingAccount) return;
   const fullName = document.getElementById("onboardFullName").value.trim();
+  const calcPin = document.getElementById("onboardPin").value.trim();
   const currency = getDropdownValue("dd-onboardCurrency") || "₹";
   const wsName = document.getElementById("onboardWsName").value.trim();
   const templateKey = getDropdownValue("dd-onboardTemplate") || "mess";
@@ -408,11 +431,15 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
     showToast("Enter your Name and Workspace Name", "error");
     return;
   }
+  if (!/^\d{3,8}$/.test(calcPin)) {
+    showToast("Set a 3 to 8 digit Calculator Lock PIN", "error");
+    return;
+  }
 
   isCreatingAccount = true;
   const btn = document.getElementById("finishOnboardingBtn");
   btn.disabled = true;
-  btn.innerText = "Setting up account...";
+  btn.innerText = "Creating account...";
 
   try {
     const extraMembers = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
@@ -426,15 +453,18 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
       currency,
       upiId,
       photoUrl: onboardAvatarDataUrl,
-      calcPin: "2007",
+      calcPin,
       onboardingDone: true,
       createdAt: serverTimestamp()
     };
 
     await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
+    localStorage.setItem(`hisab_prof_${currentUser.uid}`, JSON.stringify(userProfile));
+    localStorage.setItem("hisabcloud_pin", calcPin);
 
     await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
       name: wsName,
+      templateKey,
       slots: tpl.slots,
       presets: tpl.presets,
       members,
@@ -450,26 +480,29 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
   } finally {
     isCreatingAccount = false;
     btn.disabled = false;
-    btn.innerText = "Save Profile & Launch App →";
+    btn.innerText = "Create My Account & Launch →";
   }
 };
 
+let dashboardBooted = false;
 function launchDashboard() {
   document.getElementById("authScreen").classList.add("hidden");
   document.getElementById("onboardingScreen").classList.add("hidden");
   document.getElementById("mainAppContainer").classList.remove("hidden");
   document.getElementById("bottomNavBar").classList.remove("hidden");
 
-  syncDateIfNeeded(true);
   updateProfileUI();
-  subscribeWorkspaces();
-
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      syncDateIfNeeded(false);
-      renderTable();
-    }
-  });
+  if (!dashboardBooted) {
+    dashboardBooted = true;
+    syncDateIfNeeded(true);
+    subscribeWorkspaces();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        syncDateIfNeeded(false);
+        renderTable();
+      }
+    });
+  }
 }
 
 function updateProfileUI() {
@@ -482,7 +515,7 @@ function getCurrency() {
   return userProfile?.currency || "₹";
 }
 
-// ==================== 4. PROFILE & SETTINGS MODAL ====================
+// ==================== 4. PROFILE, SETTINGS & HIGH-FRICTION DATA WIPE ====================
 window.openProfileSettings = () => {
   if (!userProfile) return;
   profModalAvatarDataUrl = userProfile.photoUrl || "";
@@ -535,51 +568,93 @@ document.getElementById("saveProfileSettingsBtn").onclick = async () => {
   };
 
   await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
+  localStorage.setItem(`hisab_prof_${currentUser.uid}`, JSON.stringify(userProfile));
+  localStorage.setItem("hisabcloud_pin", userProfile.calcPin);
   updateProfileUI();
   renderTable();
   window.closeProfileModal();
   showToast("Profile & Settings Saved!");
 };
 
-document.getElementById("exportBackupJsonBtn").onclick = () => {
-  const ws = getActiveWorkspace();
-  const cleanRecords = rawData.map((r) => ({
-    date: r.date,
-    paidBy: r.paidBy,
-    splitBetween: r.splitBetween || ws?.members || [],
-    slotValues: r.slotValues || {},
-    other: r.other || "",
-    total: r.total
-  }));
-
-  const cleanExport = {
-    app: "HisabCloud Pro",
-    exportedAt: new Date().toLocaleString("en-IN"),
-    accountName: userProfile.fullName,
-    currency: userProfile.currency,
-    workspace: {
-      name: ws?.name,
-      members: ws?.members,
-      slots: ws?.slots,
-      budgetLimit: ws?.budgetLimit
-    },
-    records: cleanRecords
-  };
-
-  const blob = new Blob([JSON.stringify(cleanExport, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${(ws?.name || "HisabCloud").replace(/\s+/g, "_")}_CleanBackup.json`;
-  a.click();
-  showToast("Clean backup downloaded!");
-};
-
 document.getElementById("signOutAccountBtn").onclick = async () => {
   window.closeProfileModal();
+  dashboardBooted = false;
   await signOut(auth);
 };
 
-// ==================== 5. WORKSPACES & FULL CUSTOMIZATION ====================
+// High-Friction 3-Step Delete All Data Flow
+document.getElementById("openDeleteAllModalBtn").onclick = () => {
+  window.closeProfileModal();
+  const modal = document.getElementById("deleteAllDataModal");
+  const pinInp = document.getElementById("wipePinInput");
+  const phraseInp = document.getElementById("wipePhraseInput");
+  const execBtn = document.getElementById("finalWipeExecuteBtn");
+
+  pinInp.value = "";
+  phraseInp.value = "";
+  let secondsLeft = 5;
+  execBtn.disabled = true;
+  execBtn.style.opacity = "0.45";
+  execBtn.style.cursor = "not-allowed";
+  execBtn.innerText = `Wait ${secondsLeft}s...`;
+
+  const validateWipeReady = () => {
+    const pinOk = pinInp.value.trim() === getSecretPin();
+    const phraseOk = phraseInp.value.trim() === "DELETE ALL DATA";
+    const ready = secondsLeft <= 0 && pinOk && phraseOk;
+    execBtn.disabled = !ready;
+    execBtn.style.opacity = ready ? "1" : "0.45";
+    execBtn.style.cursor = ready ? "pointer" : "not-allowed";
+    execBtn.innerText = secondsLeft > 0 ? `Wait ${secondsLeft}s...` : "Erase Everything Now";
+  };
+
+  pinInp.oninput = validateWipeReady;
+  phraseInp.oninput = validateWipeReady;
+
+  clearInterval(wipeCountdownTimer);
+  wipeCountdownTimer = setInterval(() => {
+    secondsLeft--;
+    validateWipeReady();
+    if (secondsLeft <= 0) clearInterval(wipeCountdownTimer);
+  }, 1000);
+
+  modal.classList.add("show");
+};
+
+window.closeDeleteAllModal = () => {
+  clearInterval(wipeCountdownTimer);
+  document.getElementById("deleteAllDataModal").classList.remove("show");
+};
+
+document.getElementById("finalWipeExecuteBtn").onclick = async () => {
+  const btn = document.getElementById("finalWipeExecuteBtn");
+  btn.disabled = true;
+  btn.innerText = "Wiping Cloud Data...";
+
+  try {
+    const wsSnap = await getDocs(collection(db, "users", currentUser.uid, "workspaces"));
+    for (const wsDoc of wsSnap.docs) {
+      const entriesSnap = await getDocs(collection(db, "users", currentUser.uid, "workspaces", wsDoc.id, "entries"));
+      const batch = writeBatch(db);
+      entriesSnap.forEach((eDoc) => batch.delete(eDoc.ref));
+      batch.delete(wsDoc.ref);
+      await batch.commit();
+    }
+    await deleteDoc(doc(db, "users", currentUser.uid));
+    localStorage.removeItem(`hisab_prof_${currentUser.uid}`);
+    localStorage.removeItem("hisabcloud_pin");
+
+    window.closeDeleteAllModal();
+    dashboardBooted = false;
+    showToast("All cloud data permanently erased.");
+    await signOut(auth);
+  } catch (err) {
+    showToast("Delete failed: " + err.message, "error");
+    btn.disabled = false;
+  }
+};
+
+// ==================== 5. WORKSPACES & FULL CUSTOMIZATION (NO #1 #2 TAGS) ====================
 function subscribeWorkspaces() {
   if (unsubWorkspaces) unsubWorkspaces();
   const q = query(collection(db, "users", currentUser.uid, "workspaces"), orderBy("createdAt", "asc"));
@@ -591,6 +666,7 @@ function subscribeWorkspaces() {
       const tpl = WORKSPACE_TEMPLATES.mess;
       await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
         name: "My Ledger",
+        templateKey: "mess",
         slots: tpl.slots,
         presets: tpl.presets,
         members: [userProfile.fullName || "Me"],
@@ -615,9 +691,9 @@ function getActiveWorkspace() {
 }
 
 function renderWorkspaceDropdown() {
-  const opts = workspaces.map((ws, idx) => ({
+  const opts = workspaces.map((ws) => ({
     value: ws.id,
-    label: workspaces.filter((w) => w.name === ws.name).length > 1 ? `${ws.name} #${idx + 1}` : ws.name
+    label: ws.name
   }));
   renderCustomDropdown(
     "dd-workspaceSelect",
@@ -682,6 +758,7 @@ document.getElementById("createNewWsSubmitBtn").onclick = async () => {
 
     const ref = await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
       name,
+      templateKey: tplKey,
       slots: tpl.slots,
       presets: tpl.presets,
       members,
@@ -711,7 +788,6 @@ function renderDynamicEntryForm(ws) {
   const memberOpts = members.map((m) => ({ value: m, label: m }));
   renderCustomDropdown("dd-entryPaidBy", memberOpts, members[0]);
 
-  // Split Between Member Pills
   const splitSec = document.getElementById("entrySplitSection");
   const splitPillsWrap = document.getElementById("entrySplitPills");
   if (members.length > 1) {
@@ -736,7 +812,6 @@ function renderDynamicEntryForm(ws) {
     splitSec.classList.add("hidden");
   }
 
-  // Quick Presets Chips
   const presetsBar = document.getElementById("quickPresetsBar");
   presetsBar.innerHTML = "";
   presets.forEach((p) => {
@@ -748,7 +823,8 @@ function renderDynamicEntryForm(ws) {
     btn.onclick = () => {
       const targetInput = document.getElementById(`slot_input_${p.slotIndex}`);
       if (targetInput) {
-        targetInput.value = p.text;
+        const curVal = targetInput.value.trim();
+        targetInput.value = curVal ? `${curVal}, ${p.text}` : p.text;
         calcPreview();
         showToast(`Added ${p.text} to ${slotName}`);
       }
@@ -756,7 +832,6 @@ function renderDynamicEntryForm(ws) {
     presetsBar.appendChild(btn);
   });
 
-  // Dynamic Slots Inputs
   const grid = document.getElementById("dynamicSlotsGrid");
   grid.innerHTML = "";
   slots.forEach((slotLabel, idx) => {
@@ -876,6 +951,26 @@ document.getElementById("saveWsInfoBtn").onclick = async () => {
   const upiId = document.getElementById("editWsUpiInput").value.trim();
   await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { name, upiId });
   showToast("Workspace updated!");
+};
+
+// Reset Customization to Default (Preserves All Expense Entries!)
+document.getElementById("resetCustomizationsBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  const ok = await openCustomDialog({
+    title: "Reset Customization?",
+    message: "This will reset your Entry Slots and Quick Preset buttons back to default. Your saved expense records will NOT be deleted.",
+    okText: "Reset Now",
+    danger: false
+  });
+  if (!ok) return;
+
+  const tpl = WORKSPACE_TEMPLATES[ws.templateKey] || WORKSPACE_TEMPLATES.mess;
+  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
+    slots: tpl.slots,
+    presets: tpl.presets
+  });
+  showToast("Customizations reset to default (Data preserved)!");
 };
 
 document.getElementById("deleteWsBtn").onclick = async () => {
@@ -1156,7 +1251,7 @@ window.submitExpense = async () => {
   }
 };
 
-// ==================== 7. GEMINI AI SMART ENTRY, RECEIPT VISION & AUDIT ====================
+// ==================== 7. ULTRA-SMART GEMINI AI (MULTI-ITEM FILTER + AUTO-SLOT + Q&A) ====================
 async function callGeminiAI(parts) {
   const apiKey = getActiveGeminiKey();
   const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
@@ -1197,32 +1292,60 @@ function extractJsonObject(rawText) {
   }
 }
 
-async function applyParsedAiExpense(parsed) {
+async function applyMultiItemAiExpense(parsed) {
   const ws = getActiveWorkspace();
-  if (!ws || !parsed || !(Number(parsed.amount) > 0)) return false;
+  if (!ws || !parsed || !Array.isArray(parsed.items)) return null;
 
-  const isoDate = document.getElementById("entryDate").value || getLocalTodayISO();
+  const validItems = parsed.items.filter((it) => Number(it.amount) > 0);
+  if (validItems.length === 0) return null;
+
+  // Use receipt date if valid YYYY-MM-DD, otherwise active selected date
+  let isoDate = document.getElementById("entryDate").value || getLocalTodayISO();
+  if (parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) {
+    isoDate = parsed.date;
+    document.getElementById("entryDate").value = isoDate;
+  }
+
   const dateFormatted = formatDateWithDay(isoDate);
   const existing = rawData.find((r) => r.date === dateFormatted);
 
   const slots = ws.slots || [];
-  const matchedSlot = slots.find((s) => s.toLowerCase() === String(parsed.slot || "").toLowerCase()) || slots[0];
-  const itemString = `${Number(parsed.amount)} (${parsed.item || "AI Entry"})`;
-  const paidBy = (ws.members || []).find((m) => m.toLowerCase() === String(parsed.paidBy || "").toLowerCase()) || ws.members[0];
+  const members = ws.members || [userProfile.fullName];
+  const paidBy =
+    members.find((m) => m.toLowerCase() === String(parsed.paidBy || "").toLowerCase()) ||
+    existing?.paidBy ||
+    members[0];
 
   const slotValues = existing ? { ...(existing.slotValues || {}) } : {};
-  const prevVal = slotValues[matchedSlot] || "";
-  slotValues[matchedSlot] = prevVal ? `${prevVal}, ${itemString}` : itemString;
+  const extraItems = existing?.other ? existing.other.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  const summaryParts = [];
+
+  validItems.forEach((it) => {
+    const cleanName = String(it.name || "Item").replace(/[()]/g, "").trim();
+    const amt = Number(it.amount);
+    const formattedEntry = `${amt} (${cleanName})`;
+
+    const matchedSlot = slots.find((s) => s.toLowerCase() === String(it.slot || "").toLowerCase());
+    if (matchedSlot) {
+      slotValues[matchedSlot] = slotValues[matchedSlot]
+        ? `${slotValues[matchedSlot]}, ${formattedEntry}`
+        : formattedEntry;
+      summaryParts.push(`${getCurrency()}${amt} ${cleanName} → ${matchedSlot}`);
+    } else {
+      extraItems.push(formattedEntry);
+      summaryParts.push(`${getCurrency()}${amt} ${cleanName} → Other`);
+    }
+  });
 
   let slotSum = 0;
   slots.forEach((s) => (slotSum += extractAmount(slotValues[s])));
-  const otherText = existing?.other || "";
+  const otherText = extraItems.join(", ");
   const total = slotSum + extractAmount(otherText);
 
   const payload = {
     date: dateFormatted,
     paidBy,
-    splitBetween: existing?.splitBetween || ws.members,
+    splitBetween: existing?.splitBetween || members,
     slotValues,
     other: otherText,
     total,
@@ -1235,7 +1358,8 @@ async function applyParsedAiExpense(parsed) {
     payload.createdAt = serverTimestamp();
     await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"), payload);
   }
-  return true;
+
+  return summaryParts.join(" | ");
 }
 
 document.getElementById("aiSmartAddBtn").onclick = async () => {
@@ -1245,23 +1369,50 @@ document.getElementById("aiSmartAddBtn").onclick = async () => {
   const text = input.value.trim();
   if (!ws || !text) return;
 
-  banner.innerText = "✨ Gemini AI is understanding your entry...";
+  banner.innerText = "✨ Gemini AI is analyzing...";
   banner.classList.remove("hidden");
 
-  const prompt = `Extract expense from: "${text}".
+  const nowHour = new Date().getHours();
+  const timeContext =
+    nowHour < 11 ? "Morning" : nowHour < 16 ? "Afternoon/Noon" : nowHour < 20 ? "Evening" : "Night";
+
+  const ledgerContext = currentActiveRows
+    .slice(0, 15)
+    .map((r) => `${r.date}: Total ${getCurrency()}${r.total}, Paid by ${r.paidBy}, Slots=${JSON.stringify(r.slotValues)}`)
+    .join("; ");
+
+  const prompt = `You are an ultra-smart financial assistant for workspace "${ws.name}".
+Current time period: ${timeContext} (${new Date().toLocaleTimeString()}).
 Available slots: ${JSON.stringify(ws.slots)}.
 Available members: ${JSON.stringify(ws.members)}.
-Return ONLY a valid JSON object: {"item": string, "amount": number, "slot": string, "paidBy": string}.`;
+Active week records: ${ledgerContext || "None yet"}.
+
+User input: "${text}"
+
+Decide whether the user wants to LOG EXPENSES or ASK A QUESTION about their data.
+1) If LOGGING EXPENSES (e.g. "20 tea and 60 rice", "Rohan paid 300 for dinner and 50 cab"):
+   Filter each distinct item, detect the smartest matching slot from ${JSON.stringify(ws.slots)} based on item type (e.g. tea/breakfast -> Morning, rice/lunch -> Noon, snacks -> Afternoon, dinner -> Night, or match custom slots; use "Other" if none fit).
+   Return ONLY JSON: {"mode": "log", "date": null, "paidBy": string, "items": [{"name": string, "amount": number, "slot": string}]}.
+2) If ASKING A QUESTION (e.g. "How much spent?", "Who owes whom?"):
+   Return ONLY JSON: {"mode": "answer", "reply": "Concise helpful answer in 1-2 sentences using ${getCurrency()}"}`;
 
   const { text: aiReply, error } = await callGeminiAI([{ text: prompt }]);
   const parsed = extractJsonObject(aiReply);
 
-  if (parsed && (await applyParsedAiExpense(parsed))) {
+  if (parsed?.mode === "answer" && parsed.reply) {
     input.value = "";
-    banner.innerText = `✅ Added ${getCurrency()}${parsed.amount} (${parsed.item}) under ${parsed.slot}`;
-    setTimeout(() => banner.classList.add("hidden"), 3500);
+    banner.innerText = `🤖 ${parsed.reply}`;
+  } else if (parsed?.mode === "log") {
+    const summary = await applyMultiItemAiExpense(parsed);
+    if (summary) {
+      input.value = "";
+      banner.innerText = `✅ Auto-Logged: ${summary}`;
+      setTimeout(() => banner.classList.add("hidden"), 4500);
+      return;
+    }
+    banner.innerText = 'Could not detect amount. Try: "20 tea and 60 lunch"';
   } else {
-    banner.innerText = error ? `⚠️ ${error}` : 'Try format: "Paid 120 for lunch"';
+    banner.innerText = error ? `⚠️ ${error}` : 'Try: "Paid 120 for lunch" or ask a question';
   }
 };
 
@@ -1271,13 +1422,17 @@ document.getElementById("aiReceiptFile").onchange = async (e) => {
   if (!file || !ws) return;
 
   const banner = document.getElementById("aiStatusBanner");
-  banner.innerText = "📷 Compressing & scanning receipt with Gemini Vision...";
+  banner.innerText = "📷 Filtering receipt items & auto-mapping slots with Gemini Vision...";
   banner.classList.remove("hidden");
 
   try {
-    const compressed = await compressImage(file, 960, 0.82);
-    const prompt = `Read this receipt/bill image. Extract the main shop/item name as "item", the final total amount as a pure number "amount", and pick the closest slot from ${JSON.stringify(ws.slots)} as "slot".
-Return ONLY a valid JSON object: {"item": string, "amount": number, "slot": string}.`;
+    const compressed = await compressImage(file, 960, 0.84);
+    const prompt = `Analyze this receipt/bill image carefully.
+Filter out tax breakdowns, subtotal lines, phone numbers, and store addresses—extract ONLY the actual purchased items (or the grand total as 1 item if individual items aren't readable).
+For each item, intelligently assign the best slot from ${JSON.stringify(ws.slots)} based on item category or meal/time context on the receipt (use "Other" if none fit).
+Also extract the receipt date in YYYY-MM-DD format if clearly printed (otherwise null).
+Return ONLY valid JSON:
+{"date": "YYYY-MM-DD or null", "paidBy": "${ws.members[0]}", "items": [{"name": string, "amount": number, "slot": string}]}`;
 
     const { text: aiReply, error } = await callGeminiAI([
       { text: prompt },
@@ -1285,11 +1440,12 @@ Return ONLY a valid JSON object: {"item": string, "amount": number, "slot": stri
     ]);
 
     const parsed = extractJsonObject(aiReply);
-    if (parsed && (await applyParsedAiExpense(parsed))) {
-      banner.innerText = `✅ Receipt Scanned: ${getCurrency()}${parsed.amount} (${parsed.item})`;
-      setTimeout(() => banner.classList.add("hidden"), 4000);
+    const summary = await applyMultiItemAiExpense(parsed);
+    if (summary) {
+      banner.innerText = `✅ Bill Filtered & Logged: ${summary}`;
+      setTimeout(() => banner.classList.add("hidden"), 5000);
     } else {
-      banner.innerText = error ? `⚠️ ${error}` : "Could not read bill total. Try a clearer photo.";
+      banner.innerText = error ? `⚠️ ${error}` : "Could not read items from receipt. Try a clearer photo.";
     }
   } catch (err) {
     banner.innerText = "⚠️ Image processing failed.";
@@ -1310,12 +1466,12 @@ document.getElementById("aiAuditTriggerBtn").onclick = async () => {
   banner.classList.remove("hidden");
 
   const summary = currentActiveRows
-    .map((r) => `${r.date}: Total ${getCurrency()}${r.total} (Paid by ${r.paidBy})`)
+    .map((r) => `${r.date}: Total ${getCurrency()}${r.total} (Paid by ${r.paidBy}, ${JSON.stringify(r.slotValues)})`)
     .join("; ");
 
   const { text: advice, error } = await callGeminiAI([
     {
-      text: `Analyze these expenses for "${ws.name}": ${summary}. Give 2 short, practical money-saving insights in simple English (max 45 words).`
+      text: `Audit these expenses for "${ws.name}": ${summary}. Give 2 short, sharp money-saving insights in simple English (max 45 words).`
     }
   ]);
 
@@ -1830,7 +1986,42 @@ function renderCharts() {
   });
 }
 
-// ==================== 9. WHATSAPP SHARE & PDF REPORT ====================
+// ==================== 9. CLEAN EXCEL/CSV, WHATSAPP SHARE & PDF REPORT ====================
+window.exportCSV = () => {
+  const ws = getActiveWorkspace();
+  if (!ws || rawData.length === 0) return showToast("No records available to export", "error");
+
+  const slots = ws.slots || [];
+  const headers = ["Date", "Paid By", ...slots, "Other", "Total"];
+  const escapeCsv = (val) => `"${String(val || "-").replace(/"/g, '""')}"`;
+
+  const lines = [headers.map(escapeCsv).join(",")];
+  let grandTotal = 0;
+
+  rawData.forEach((r) => {
+    grandTotal += Number(r.total) || 0;
+    const row = [
+      r.date,
+      r.paidBy || ws.members[0],
+      ...slots.map((s) => r.slotValues?.[s] || "-"),
+      r.other || "-",
+      r.total
+    ];
+    lines.push(row.map(escapeCsv).join(","));
+  });
+
+  const footer = new Array(slots.length + 2).fill("");
+  footer.push("TOTAL", grandTotal);
+  lines.push(footer.map(escapeCsv).join(","));
+
+  const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${ws.name.replace(/\s+/g, "_")}_HisabSheet_${getLocalTodayISO()}.csv`;
+  a.click();
+  showToast("Excel/CSV Sheet downloaded!");
+};
+
 window.shareWeeklyReport = () => {
   const ws = getActiveWorkspace();
   if (!ws || currentActiveRows.length === 0) return showToast("No records in active week to share", "error");
