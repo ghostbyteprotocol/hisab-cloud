@@ -1,0 +1,9 @@
+{
+  "appId": "com.hisabcloud.pro",
+  "appName": "HisabCloud Pro",
+  "webDir": "www",
+  "server": {
+    "url": "https://ghostbyteprotocol.github.io/hisab-cloud-pro/",
+    "cleartext": true
+  }
+}
