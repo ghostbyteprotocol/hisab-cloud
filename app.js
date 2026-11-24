@@ -58,12 +58,9 @@ async function checkForAppUpdates(manual = false) {
     const apkAsset = (release.assets || []).find((a) => a.name.endsWith(".apk"));
     const downloadUrl = apkAsset ? apkAsset.browser_download_url : release.html_url;
 
-    // First-time baseline registration if user never recorded their installed tag
     const installedTag = localStorage.getItem("hisabcloud_installed_tag");
     if (!installedTag && !manual) {
-      if (compareSemver(latestTag, APP_VERSION) > 0) {
-        // Newer release exists than hardcoded APP_VERSION
-      } else {
+      if (compareSemver(latestTag, APP_VERSION) <= 0) {
         localStorage.setItem("hisabcloud_installed_tag", latestTag || `v${APP_VERSION}`);
         return;
       }
