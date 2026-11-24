@@ -2514,3 +2514,29 @@ function escapeHtml(str) {
     "'": "&#39;"
   }[m]));
 }
+setTimeout(async () => {
+  try {
+    if (!auth.currentUser) return;
+    const uid = auth.currentUser.uid;
+    const wsSnap = await getDocs(collection(db, "users", uid, "workspaces"));
+    if (wsSnap.empty) {
+      const profSnap = await getDoc(doc(db, "users", uid));
+      const pData = profSnap.exists() ? profSnap.data() : {};
+      await addDoc(collection(db, "users", uid, "workspaces"), {
+        name: "My Ledger",
+        templateKey: "mess",
+        slots: ["Morning", "Noon", "Afternoon", "Night"],
+        presets: [
+          { slotIndex: 0, text: "20 (Breakfast)" },
+          { slotIndex: 1, text: "60 (Lunch)" },
+          { slotIndex: 2, text: "15 (Tea & Snacks)" },
+          { slotIndex: 3, text: "45 (Dinner)" }
+        ],
+        members: [pData.fullName || "Me"],
+        upiId: pData.upiId || "",
+        budgetLimit: 5000,
+        createdAt: serverTimestamp()
+      });
+    }
+  } catch (e) {}
+}, 2500);
