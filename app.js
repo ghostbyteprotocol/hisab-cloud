@@ -1,10 +1,15 @@
-// app.js — HisabCloud Pro Engine (Persistent Auth, Ultra-Smart Gemini Receipt Filter & Q&A, Reset Customizations, CSV/PDF, 3-Step Wipe)
+// app.js — HisabCloud Pro Engine (Side Gemini Data Chat, Verified Auth, Auto-Calculator Lock, 10x '=' PIN Reset, Receipt Filter, CSV/PDF)
 import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
+  EmailAuthProvider,
   signInWithPopup,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  reauthenticateWithCredential,
+  reauthenticateWithPopup,
   signOut,
   onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -89,12 +94,7 @@ function renderCustomDropdown(containerId, options, selectedValue, onChange, ext
     options.find((o) => String(o.value) === String(selectedValue)) ||
     options[0] || { value: "", label: "Select" };
 
-  dropdownRegistry[containerId] = {
-    value: currentOpt.value,
-    options,
-    onChange,
-    extraBtnClass
-  };
+  dropdownRegistry[containerId] = { value: currentOpt.value, options, onChange, extraBtnClass };
 
   container.innerHTML = `
     <div class="c-dropdown" id="wrap-${containerId}">
@@ -145,7 +145,7 @@ document.addEventListener("click", () => {
   document.querySelectorAll(".c-dropdown.open").forEach((el) => el.classList.remove("open"));
 });
 
-// ==================== CUSTOM WEBSITE-THEMED CONFIRM & PROMPT DIALOG ====================
+// ==================== CUSTOM WEBSITE-THEMED DIALOG ====================
 function openCustomDialog({ title, message, showInput = false, defaultValue = "", okText = "Confirm", danger = false }) {
   return new Promise((resolve) => {
     const modal = document.getElementById("customDialogModal");
@@ -202,6 +202,10 @@ let isEmailSignUp = true;
 let isCreatingAccount = false;
 let isCreatingWs = false;
 let wipeCountdownTimer = null;
+let dashboardBooted = false;
+let initialSessionLockApplied = false;
+let justCompletedSignup = false;
+let aiChatHistory = [];
 
 let catChartInstance = null;
 let trendChartInstance = null;
@@ -249,14 +253,17 @@ function compressImage(file, maxDim = 960, quality = 0.84) {
   });
 }
 
-// ==================== 1. SECRET CALCULATOR & STEALTH BLUR ====================
+// ==================== 1. SECRET CALCULATOR, 10x '=' PIN RESET & STEALTH BLUR ====================
 let calcExpression = "";
+let eqSecretTapCount = 0;
+let eqTapResetTimer = null;
 
 function getSecretPin() {
   return userProfile?.calcPin || localStorage.getItem("hisabcloud_pin") || "2007";
 }
 
 window.calcAppend = (val) => {
+  eqSecretTapCount = 0;
   if (calcExpression === "Error") calcExpression = "";
   calcExpression += val;
   document.getElementById("calcScreen").innerText = calcExpression || "0";
@@ -269,18 +276,36 @@ window.calcClear = () => {
 };
 
 window.calcBack = () => {
+  eqSecretTapCount = 0;
   if (calcExpression === "Error") calcExpression = "";
   calcExpression = calcExpression.slice(0, -1);
   document.getElementById("calcScreen").innerText = calcExpression || "0";
 };
 
 window.calcEquals = () => {
-  if (calcExpression === getSecretPin()) {
+  const pin = getSecretPin();
+  if (calcExpression === pin) {
+    eqSecretTapCount = 0;
     window.calcClear();
     document.getElementById("calcLockScreen").classList.add("unlocked");
     showToast("Vault Unlocked");
     return;
   }
+
+  eqSecretTapCount += 1;
+  clearTimeout(eqTapResetTimer);
+  eqTapResetTimer = setTimeout(() => {
+    eqSecretTapCount = 0;
+  }, 4000);
+
+  if (eqSecretTapCount >= 10) {
+    eqSecretTapCount = 0;
+    clearTimeout(eqTapResetTimer);
+    window.calcClear();
+    openVerifiedPinResetModal();
+    return;
+  }
+
   try {
     if (!calcExpression) return;
     document.getElementById("calcHistory").innerText = calcExpression;
@@ -296,6 +321,7 @@ window.calcEquals = () => {
 
 window.lockVault = () => {
   window.calcClear();
+  eqSecretTapCount = 0;
   document.getElementById("calcLockScreen").classList.remove("unlocked");
 };
 
@@ -306,15 +332,17 @@ window.toggleStealthBlur = () => {
   btn.innerText = isBlurred ? "🙈" : "👁️";
 };
 
-// ==================== 2. PERSISTENT AUTHENTICATION ====================
+// ==================== 2. VERIFIED AUTHENTICATION & FORGOT PASSWORD ====================
 const googleProvider = new GoogleAuthProvider();
 
 document.getElementById("googleSignInBtn").onclick = async () => {
   const errBox = document.getElementById("authErrorBox");
   errBox.classList.add("hidden");
   try {
+    justCompletedSignup = true;
     await signInWithPopup(auth, googleProvider);
   } catch (err) {
+    justCompletedSignup = false;
     errBox.textContent = err.message || "Google Sign-In failed.";
     errBox.classList.remove("hidden");
   }
@@ -336,65 +364,157 @@ document.getElementById("emailAuthForm").onsubmit = async (e) => {
   errBox.classList.add("hidden");
 
   try {
+    justCompletedSignup = true;
     if (isEmailSignUp) {
-      await createUserWithEmailAndPassword(auth, email, pass);
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await sendEmailVerification(cred.user);
+      showToast("Verification link sent to your email!");
     } else {
-      await signInWithEmailAndPassword(auth, email, pass);
+      const cred = await signInWithEmailAndPassword(auth, email, pass);
+      if (!cred.user.emailVerified) {
+        await sendEmailVerification(cred.user).catch(() => {});
+        showToast("Please verify your email link first", "error");
+      }
     }
   } catch (err) {
     if (err.code === "auth/email-already-in-use") {
       try {
-        await signInWithEmailAndPassword(auth, email, pass);
+        const cred = await signInWithEmailAndPassword(auth, email, pass);
+        if (!cred.user.emailVerified) {
+          await sendEmailVerification(cred.user).catch(() => {});
+        }
         return;
       } catch (e2) {
+        justCompletedSignup = false;
         errBox.textContent = e2.message;
       }
     } else {
+      justCompletedSignup = false;
       errBox.textContent = err.message;
     }
     errBox.classList.remove("hidden");
   }
 };
 
-onAuthStateChanged(auth, async (user) => {
+document.getElementById("openForgotPwdBtn").onclick = () => {
+  document.getElementById("forgotPwdEmailInput").value = document.getElementById("authEmail").value.trim();
+  document.getElementById("forgotPwdModal").classList.add("show");
+};
+
+document.getElementById("sendForgotPwdBtn").onclick = async () => {
+  const email = document.getElementById("forgotPwdEmailInput").value.trim();
+  if (!email) return showToast("Enter your email address", "error");
+  try {
+    await sendPasswordResetEmail(auth, email);
+    document.getElementById("forgotPwdModal").classList.remove("show");
+    showToast("Password reset link sent to your email!");
+  } catch (err) {
+    showToast(err.message || "Failed to send reset link", "error");
+  }
+};
+
+document.getElementById("checkVerifiedBtn").onclick = async () => {
+  if (!currentUser) return;
+  await currentUser.reload();
+  if (currentUser.emailVerified) {
+    showToast("Email Verified!");
+    document.getElementById("verifyEmailScreen").classList.add("hidden");
+    const profileSnap = await getDoc(doc(db, "users", currentUser.uid));
+    if (!profileSnap.exists() || !profileSnap.data().onboardingDone) {
+      openOnboarding(currentUser);
+    } else {
+      userProfile = profileSnap.data();
+      launchDashboard(false);
+    }
+  } else {
+    showToast("Not verified yet. Click the link in your email inbox!", "error");
+  }
+};
+
+document.getElementById("resendVerifyLinkBtn").onclick = async () => {
+  if (!currentUser) return;
+  try {
+    await sendEmailVerification(currentUser);
+    showToast("New verification link sent!");
+  } catch (err) {
+    showToast(err.message || "Wait a moment before resending", "error");
+  }
+};
+
+document.getElementById("verifyLogoutBtn").onclick = async () => {
+  document.getElementById("verifyEmailScreen").classList.add("hidden");
+  await signOut(auth);
+};
+
+function hideSplashScreen() {
   const bootSplash = document.getElementById("bootSplash");
+  if (bootSplash) bootSplash.classList.add("hidden");
+}
+
+function fetchDocWithTimeout(docRef, ms = 3500) {
+  return Promise.race([
+    getDoc(docRef),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
+  ]);
+}
+
+onAuthStateChanged(auth, async (user) => {
   currentUser = user;
 
   if (!user) {
-    if (bootSplash) bootSplash.classList.add("hidden");
+    hideSplashScreen();
+    initialSessionLockApplied = false;
+    document.getElementById("calcLockScreen").classList.add("unlocked");
     document.getElementById("authScreen").classList.remove("hidden");
+    document.getElementById("verifyEmailScreen").classList.add("hidden");
     document.getElementById("onboardingScreen").classList.add("hidden");
     document.getElementById("mainAppContainer").classList.add("hidden");
     document.getElementById("bottomNavBar").classList.add("hidden");
     return;
   }
 
-  // Load cached profile immediately for zero-lag transition
+  const usesPasswordProvider = user.providerData.some((p) => p.providerId === "password");
+  if (usesPasswordProvider && !user.emailVerified) {
+    hideSplashScreen();
+    document.getElementById("authScreen").classList.add("hidden");
+    document.getElementById("verifyTargetEmail").innerText = user.email || "";
+    document.getElementById("verifyEmailScreen").classList.remove("hidden");
+    return;
+  }
+
+  let hasCachedProfile = false;
   try {
     const cached = JSON.parse(localStorage.getItem(`hisab_prof_${user.uid}`) || "null");
     if (cached && cached.onboardingDone) {
       userProfile = cached;
-      if (bootSplash) bootSplash.classList.add("hidden");
-      launchDashboard();
+      hasCachedProfile = true;
+      hideSplashScreen();
+      launchDashboard(!justCompletedSignup);
     }
   } catch (e) {}
 
-  const profileSnap = await getDoc(doc(db, "users", user.uid));
-  if (bootSplash) bootSplash.classList.add("hidden");
-
-  if (!profileSnap.exists() || !profileSnap.data().onboardingDone) {
-    openOnboarding(user);
-  } else {
-    userProfile = profileSnap.data();
-    localStorage.setItem(`hisab_prof_${user.uid}`, JSON.stringify(userProfile));
-    localStorage.setItem("hisabcloud_pin", userProfile.calcPin || "2007");
-    launchDashboard();
+  try {
+    const profileSnap = await fetchDocWithTimeout(doc(db, "users", user.uid), 3500);
+    hideSplashScreen();
+    if (!profileSnap.exists() || !profileSnap.data().onboardingDone) {
+      if (!hasCachedProfile) openOnboarding(user);
+    } else {
+      userProfile = profileSnap.data();
+      localStorage.setItem(`hisab_prof_${user.uid}`, JSON.stringify(userProfile));
+      localStorage.setItem("hisabcloud_pin", userProfile.calcPin || "2007");
+      launchDashboard(!justCompletedSignup);
+    }
+  } catch (err) {
+    hideSplashScreen();
+    if (!hasCachedProfile) openOnboarding(user);
   }
 });
 
-// ==================== 3. ACCOUNT PROFILE SETUP (ONBOARDING WITH CUSTOM PIN) ====================
+// ==================== 3. ACCOUNT PROFILE SETUP (ONBOARDING) ====================
 function openOnboarding(user) {
+  hideSplashScreen();
   document.getElementById("authScreen").classList.add("hidden");
+  document.getElementById("verifyEmailScreen").classList.add("hidden");
   document.getElementById("mainAppContainer").classList.add("hidden");
   document.getElementById("bottomNavBar").classList.add("hidden");
   document.getElementById("onboardingScreen").classList.remove("hidden");
@@ -462,7 +582,7 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
     localStorage.setItem(`hisab_prof_${currentUser.uid}`, JSON.stringify(userProfile));
     localStorage.setItem("hisabcloud_pin", calcPin);
 
-    await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
+    const wsRef = await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
       name: wsName,
       templateKey,
       slots: tpl.slots,
@@ -472,9 +592,10 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
       budgetLimit,
       createdAt: serverTimestamp()
     });
+    activeWorkspaceId = wsRef.id;
 
     showToast("Account & Workspace Created!");
-    launchDashboard();
+    launchDashboard(false);
   } catch (err) {
     showToast("Setup failed: " + err.message, "error");
   } finally {
@@ -484,12 +605,18 @@ document.getElementById("finishOnboardingBtn").onclick = async () => {
   }
 };
 
-let dashboardBooted = false;
-function launchDashboard() {
+function launchDashboard(lockCalculatorOnBoot = false) {
+  hideSplashScreen();
   document.getElementById("authScreen").classList.add("hidden");
+  document.getElementById("verifyEmailScreen").classList.add("hidden");
   document.getElementById("onboardingScreen").classList.add("hidden");
   document.getElementById("mainAppContainer").classList.remove("hidden");
   document.getElementById("bottomNavBar").classList.remove("hidden");
+
+  if (lockCalculatorOnBoot && !initialSessionLockApplied) {
+    initialSessionLockApplied = true;
+    window.lockVault();
+  }
 
   updateProfileUI();
   if (!dashboardBooted) {
@@ -515,7 +642,264 @@ function getCurrency() {
   return userProfile?.currency || "₹";
 }
 
-// ==================== 4. PROFILE, SETTINGS & HIGH-FRICTION DATA WIPE ====================
+// ==================== 4. VERIFIED CALCULATOR PIN RESET (SETTINGS + 10x '=' TAP) ====================
+function openVerifiedPinResetModal() {
+  if (!currentUser) return;
+  const modal = document.getElementById("pinResetModal");
+  const stepVerify = document.getElementById("pinResetStepVerify");
+  const stepNew = document.getElementById("pinResetStepNew");
+  const emailInp = document.getElementById("pinResetEmail");
+  const pwdWrap = document.getElementById("pinResetPwdWrap");
+  const pwdInp = document.getElementById("pinResetPassword");
+  const sendBtn = document.getElementById("pinSendVerifyBtn");
+  const confirmBox = document.getElementById("pinVerifyConfirmBox");
+  const errEl = document.getElementById("pinResetErrMsg");
+
+  stepVerify.classList.remove("hidden");
+  stepNew.classList.add("hidden");
+  confirmBox.classList.add("hidden");
+  errEl.classList.add("hidden");
+  pwdInp.value = "";
+  document.getElementById("pinNewInput").value = "";
+  document.getElementById("pinNewConfirmInput").value = "";
+
+  emailInp.value = currentUser.email || "";
+  const isPasswordUser = currentUser.providerData.some((p) => p.providerId === "password");
+  if (isPasswordUser) {
+    pwdWrap.classList.remove("hidden");
+    sendBtn.disabled = false;
+    sendBtn.innerText = "Verify Email & Password →";
+  } else {
+    pwdWrap.classList.add("hidden");
+    sendBtn.disabled = false;
+    sendBtn.innerText = "Verify via Google Account →";
+  }
+
+  modal.classList.add("show");
+}
+
+window.closePinResetModal = () => {
+  document.getElementById("pinResetModal").classList.remove("show");
+};
+
+document.getElementById("settingsResetPinBtn").onclick = () => {
+  window.closeProfileModal();
+  openVerifiedPinResetModal();
+};
+
+document.getElementById("pinSendVerifyBtn").onclick = async () => {
+  if (!currentUser) return;
+  const errEl = document.getElementById("pinResetErrMsg");
+  const sendBtn = document.getElementById("pinSendVerifyBtn");
+  const confirmBox = document.getElementById("pinVerifyConfirmBox");
+  errEl.classList.add("hidden");
+
+  const isPasswordUser = currentUser.providerData.some((p) => p.providerId === "password");
+  sendBtn.disabled = true;
+  sendBtn.innerText = "Verifying...";
+
+  try {
+    if (isPasswordUser) {
+      const pass = document.getElementById("pinResetPassword").value;
+      if (!pass) throw new Error("Enter your account password.");
+      const cred = EmailAuthProvider.credential(currentUser.email, pass);
+      await reauthenticateWithCredential(currentUser, cred);
+    } else {
+      await reauthenticateWithPopup(currentUser, googleProvider);
+    }
+
+    confirmBox.classList.remove("hidden");
+    sendBtn.innerText = "Verified ✓";
+    showToast("Identity verified! Tap Confirmed to set new PIN.");
+  } catch (err) {
+    errEl.innerText = err.message || "Verification failed. Check your password.";
+    errEl.classList.remove("hidden");
+    sendBtn.disabled = false;
+    sendBtn.innerText = isPasswordUser ? "Verify Email & Password →" : "Verify via Google Account →";
+  }
+};
+
+document.getElementById("pinConfirmVerifiedBtn").onclick = () => {
+  document.getElementById("pinResetStepVerify").classList.add("hidden");
+  document.getElementById("pinResetStepNew").classList.remove("hidden");
+  setTimeout(() => document.getElementById("pinNewInput").focus(), 60);
+};
+
+document.getElementById("saveNewCalcPinBtn").onclick = async () => {
+  const p1 = document.getElementById("pinNewInput").value.trim();
+  const p2 = document.getElementById("pinNewConfirmInput").value.trim();
+
+  if (!/^\d{3,8}$/.test(p1)) return showToast("PIN must be 3 to 8 digits", "error");
+  if (p1 !== p2) return showToast("PINs do not match", "error");
+
+  userProfile = { ...userProfile, calcPin: p1 };
+  await setDoc(doc(db, "users", currentUser.uid), { calcPin: p1 }, { merge: true });
+  localStorage.setItem(`hisab_prof_${currentUser.uid}`, JSON.stringify(userProfile));
+  localStorage.setItem("hisabcloud_pin", p1);
+
+  window.closePinResetModal();
+  document.getElementById("calcLockScreen").classList.add("unlocked");
+  showToast("New Calculator PIN Saved & Unlocked!");
+};
+
+// ==================== 5. SIDE GEMINI AI DATA CHAT ASSISTANT ====================
+function openAiSideDrawer() {
+  document.getElementById("aiDrawerBackdrop").classList.add("show");
+  document.getElementById("aiSideDrawer").classList.add("open");
+  setTimeout(() => document.getElementById("aiDrawerInput").focus(), 180);
+}
+
+function closeAiSideDrawer() {
+  document.getElementById("aiDrawerBackdrop").classList.remove("show");
+  document.getElementById("aiSideDrawer").classList.remove("open");
+}
+
+document.getElementById("openAiDrawerBtn").onclick = openAiSideDrawer;
+document.getElementById("closeAiDrawerBtn").onclick = closeAiSideDrawer;
+document.getElementById("aiDrawerBackdrop").onclick = closeAiSideDrawer;
+
+document.getElementById("clearAiChatBtn").onclick = () => {
+  aiChatHistory = [];
+  document.getElementById("aiChatMessages").innerHTML =
+    `<div class="chat-bubble ai">Chat cleared! Ask me anything about your expenses, balances, or budget.</div>`;
+};
+
+function appendChatBubble(role, text) {
+  const box = document.getElementById("aiChatMessages");
+  const div = document.createElement("div");
+  div.className = `chat-bubble ${role}`;
+  div.innerText = text;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  return div;
+}
+
+function buildLiveFinancialSnapshot() {
+  const ws = getActiveWorkspace();
+  if (!ws) return "No active workspace yet.";
+  const cur = getCurrency();
+  const members = ws.members || [];
+
+  const paidByMember = {};
+  const netBalances = {};
+  members.forEach((m) => {
+    paidByMember[m] = 0;
+    netBalances[m] = 0;
+  });
+
+  let activeWeekTotal = 0;
+  currentActiveRows.forEach((r) => {
+    const amt = Number(r.total) || 0;
+    activeWeekTotal += amt;
+    const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
+    if (payer) {
+      paidByMember[payer] += amt;
+      netBalances[payer] += amt;
+    }
+    const validSplitters = (r.splitBetween || members).filter((m) => Object.prototype.hasOwnProperty.call(netBalances, m));
+    const activeSplitters = validSplitters.length > 0 ? validSplitters : members;
+    if (activeSplitters.length > 0) {
+      const share = amt / activeSplitters.length;
+      activeSplitters.forEach((s) => (netBalances[s] -= share));
+    }
+  });
+
+  const allTimeTotal = rawData.reduce((s, r) => s + (Number(r.total) || 0), 0);
+  const recentRecords = rawData.slice(0, 35).map((r) => ({
+    date: r.date,
+    paidBy: r.paidBy,
+    splitBetween: r.splitBetween,
+    slots: r.slotValues,
+    other: r.other,
+    total: r.total
+  }));
+
+  return JSON.stringify({
+    user: userProfile?.fullName,
+    currency: cur,
+    allWorkspaces: workspaces.map((w) => w.name),
+    activeWorkspace: ws.name,
+    members,
+    slots: ws.slots,
+    monthlyBudgetLimit: ws.budgetLimit || 5000,
+    activeWeekTotal,
+    allTimeTotal,
+    paidByMemberActiveWeek: paidByMember,
+    netBalancesActiveWeek: netBalances,
+    recentEntries: recentRecords
+  });
+}
+
+async function askSideAiAssistant(questionText) {
+  const q = questionText.trim();
+  if (!q) return;
+
+  appendChatBubble("user", q);
+  const thinkingBubble = appendChatBubble("ai", "Thinking...");
+
+  const snapshot = buildLiveFinancialSnapshot();
+  const systemPrompt = `You are HisabCloud Pro's built-in personal AI financial assistant for ${userProfile?.fullName || "the user"}.
+You have complete real-time access to the user's financial data below:
+${snapshot}
+
+Rules:
+1. Answer the user's question accurately using ONLY the live data provided above.
+2. Reply in the exact language the user asked in (English, Bengali, or Hindi).
+3. Be warm, concise, clear, and use bullet points or clean numbers with ${getCurrency()}. Do not use raw markdown asterisks like ** if plain clean text reads better.`;
+
+  aiChatHistory.push({ role: "user", parts: [{ text: q }] });
+  const contents = [
+    { role: "user", parts: [{ text: systemPrompt }] },
+    ...aiChatHistory.slice(-8)
+  ];
+
+  const apiKey = getActiveGeminiKey();
+  const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
+  let replyText = null;
+
+  for (const model of models) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-goog-api-key": apiKey
+          },
+          body: JSON.stringify({ contents })
+        }
+      );
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (res.ok && text) {
+        replyText = text.trim();
+        break;
+      }
+    } catch (e) {}
+  }
+
+  if (replyText) {
+    thinkingBubble.innerText = replyText;
+    aiChatHistory.push({ role: "model", parts: [{ text: replyText }] });
+  } else {
+    thinkingBubble.innerText = "Sorry, I couldn't connect to Gemini right now. Please check your internet or API key.";
+  }
+}
+
+document.getElementById("aiDrawerForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const inp = document.getElementById("aiDrawerInput");
+  const text = inp.value;
+  inp.value = "";
+  await askSideAiAssistant(text);
+};
+
+document.querySelectorAll(".ai-chip-ask").forEach((chip) => {
+  chip.onclick = () => askSideAiAssistant(chip.dataset.q);
+});
+
+// ==================== 6. PROFILE, SETTINGS & HIGH-FRICTION DATA WIPE ====================
 window.openProfileSettings = () => {
   if (!userProfile) return;
   profModalAvatarDataUrl = userProfile.photoUrl || "";
@@ -524,7 +908,6 @@ window.openProfileSettings = () => {
   document.getElementById("profModalName").value = userProfile.fullName || "";
   renderCustomDropdown("dd-profModalCurrency", CURRENCY_OPTIONS, userProfile.currency || "₹");
   document.getElementById("profModalUpi").value = userProfile.upiId || "";
-  document.getElementById("profModalPin").value = userProfile.calcPin || "";
   document.getElementById("profModalGeminiKey").value = localStorage.getItem("hisabcloud_custom_gemini_key") || "";
   document.getElementById("profileModal").classList.add("show");
 };
@@ -547,13 +930,7 @@ document.getElementById("saveProfileSettingsBtn").onclick = async () => {
   const fullName = document.getElementById("profModalName").value.trim() || userProfile.fullName;
   const currency = getDropdownValue("dd-profModalCurrency") || "₹";
   const upiId = document.getElementById("profModalUpi").value.trim();
-  const pinVal = document.getElementById("profModalPin").value.trim();
   const customGemini = document.getElementById("profModalGeminiKey").value.trim();
-
-  if (pinVal && !/^\d{3,8}$/.test(pinVal)) {
-    showToast("Calculator PIN must be 3 to 8 digits", "error");
-    return;
-  }
 
   if (customGemini) localStorage.setItem("hisabcloud_custom_gemini_key", customGemini);
   else localStorage.removeItem("hisabcloud_custom_gemini_key");
@@ -563,13 +940,11 @@ document.getElementById("saveProfileSettingsBtn").onclick = async () => {
     fullName,
     currency,
     upiId,
-    photoUrl: profModalAvatarDataUrl,
-    calcPin: pinVal || userProfile.calcPin || "2007"
+    photoUrl: profModalAvatarDataUrl
   };
 
   await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
   localStorage.setItem(`hisab_prof_${currentUser.uid}`, JSON.stringify(userProfile));
-  localStorage.setItem("hisabcloud_pin", userProfile.calcPin);
   updateProfileUI();
   renderTable();
   window.closeProfileModal();
@@ -579,10 +954,11 @@ document.getElementById("saveProfileSettingsBtn").onclick = async () => {
 document.getElementById("signOutAccountBtn").onclick = async () => {
   window.closeProfileModal();
   dashboardBooted = false;
+  initialSessionLockApplied = false;
+  justCompletedSignup = false;
   await signOut(auth);
 };
 
-// High-Friction 3-Step Delete All Data Flow
 document.getElementById("openDeleteAllModalBtn").onclick = () => {
   window.closeProfileModal();
   const modal = document.getElementById("deleteAllDataModal");
@@ -646,6 +1022,7 @@ document.getElementById("finalWipeExecuteBtn").onclick = async () => {
 
     window.closeDeleteAllModal();
     dashboardBooted = false;
+    initialSessionLockApplied = false;
     showToast("All cloud data permanently erased.");
     await signOut(auth);
   } catch (err) {
@@ -654,28 +1031,15 @@ document.getElementById("finalWipeExecuteBtn").onclick = async () => {
   }
 };
 
-// ==================== 5. WORKSPACES & FULL CUSTOMIZATION (NO #1 #2 TAGS) ====================
+// ==================== 7. WORKSPACES & FULL CUSTOMIZATION ====================
 function subscribeWorkspaces() {
   if (unsubWorkspaces) unsubWorkspaces();
   const q = query(collection(db, "users", currentUser.uid, "workspaces"), orderBy("createdAt", "asc"));
-  unsubWorkspaces = onSnapshot(q, async (snap) => {
+  unsubWorkspaces = onSnapshot(q, (snap) => {
     workspaces = [];
     snap.forEach((d) => workspaces.push({ id: d.id, ...d.data() }));
 
-    if (workspaces.length === 0) {
-      const tpl = WORKSPACE_TEMPLATES.mess;
-      await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
-        name: "My Ledger",
-        templateKey: "mess",
-        slots: tpl.slots,
-        presets: tpl.presets,
-        members: [userProfile.fullName || "Me"],
-        upiId: userProfile.upiId || "",
-        budgetLimit: 5000,
-        createdAt: serverTimestamp()
-      });
-      return;
-    }
+    if (workspaces.length === 0) return;
 
     if (!activeWorkspaceId || !workspaces.some((w) => w.id === activeWorkspaceId)) {
       activeWorkspaceId = workspaces[0].id;
@@ -731,7 +1095,6 @@ function loadActiveWorkspace() {
   });
 }
 
-// Create New Workspace Modal
 document.getElementById("openNewWsModalBtn").onclick = () => {
   renderCustomDropdown("dd-newWsTemplateSelect", TEMPLATE_OPTIONS, "mess");
   document.getElementById("newWsModal").classList.add("show");
@@ -779,7 +1142,6 @@ document.getElementById("createNewWsSubmitBtn").onclick = async () => {
   }
 };
 
-// Render Customizable Entry Form Slots, Presets & Split Pills
 function renderDynamicEntryForm(ws) {
   const slots = ws.slots || ["Morning", "Noon", "Afternoon", "Night"];
   const presets = ws.presets || [];
@@ -848,7 +1210,6 @@ function renderDynamicEntryForm(ws) {
   resetOthersContainer("othersContainer", []);
 }
 
-// Render Customization Tab Controls
 function renderCustomizationTab(ws) {
   const slots = ws.slots || [];
   const presets = ws.presets || [];
@@ -953,7 +1314,6 @@ document.getElementById("saveWsInfoBtn").onclick = async () => {
   showToast("Workspace updated!");
 };
 
-// Reset Customization to Default (Preserves All Expense Entries!)
 document.getElementById("resetCustomizationsBtn").onclick = async () => {
   const ws = getActiveWorkspace();
   if (!ws) return;
@@ -983,12 +1343,16 @@ document.getElementById("deleteWsBtn").onclick = async () => {
     danger: true
   });
   if (!ok) return;
-  await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id));
+  const entriesSnap = await getDocs(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"));
+  const batch = writeBatch(db);
+  entriesSnap.forEach((eDoc) => batch.delete(eDoc.ref));
+  batch.delete(doc(db, "users", currentUser.uid, "workspaces", ws.id));
+  await batch.commit();
   activeWorkspaceId = null;
   showToast("Workspace deleted");
 };
 
-// ==================== 6. SMART INPUT & ENTRY LOGIC ====================
+// ==================== 8. SMART INPUT & ENTRY LOGIC ====================
 window.switchTab = (tabName, el) => {
   document.querySelectorAll(".tab-view").forEach((v) => v.classList.remove("active"));
   document.querySelectorAll(".nav-tab").forEach((t) => t.classList.remove("active"));
@@ -1251,7 +1615,7 @@ window.submitExpense = async () => {
   }
 };
 
-// ==================== 7. ULTRA-SMART GEMINI AI (MULTI-ITEM FILTER + AUTO-SLOT + Q&A) ====================
+// ==================== 9. ULTRA-SMART GEMINI AI (BILL SCANNER + AUTO-SLOT FILTER) ====================
 async function callGeminiAI(parts) {
   const apiKey = getActiveGeminiKey();
   const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
@@ -1299,7 +1663,6 @@ async function applyMultiItemAiExpense(parsed) {
   const validItems = parsed.items.filter((it) => Number(it.amount) > 0);
   if (validItems.length === 0) return null;
 
-  // Use receipt date if valid YYYY-MM-DD, otherwise active selected date
   let isoDate = document.getElementById("entryDate").value || getLocalTodayISO();
   if (parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) {
     isoDate = parsed.date;
@@ -1369,50 +1732,25 @@ document.getElementById("aiSmartAddBtn").onclick = async () => {
   const text = input.value.trim();
   if (!ws || !text) return;
 
-  banner.innerText = "✨ Gemini AI is analyzing...";
+  banner.innerText = "✨ Gemini AI is sorting items into slots...";
   banner.classList.remove("hidden");
 
-  const nowHour = new Date().getHours();
-  const timeContext =
-    nowHour < 11 ? "Morning" : nowHour < 16 ? "Afternoon/Noon" : nowHour < 20 ? "Evening" : "Night";
-
-  const ledgerContext = currentActiveRows
-    .slice(0, 15)
-    .map((r) => `${r.date}: Total ${getCurrency()}${r.total}, Paid by ${r.paidBy}, Slots=${JSON.stringify(r.slotValues)}`)
-    .join("; ");
-
-  const prompt = `You are an ultra-smart financial assistant for workspace "${ws.name}".
-Current time period: ${timeContext} (${new Date().toLocaleTimeString()}).
+  const prompt = `Extract expenses from: "${text}".
 Available slots: ${JSON.stringify(ws.slots)}.
 Available members: ${JSON.stringify(ws.members)}.
-Active week records: ${ledgerContext || "None yet"}.
-
-User input: "${text}"
-
-Decide whether the user wants to LOG EXPENSES or ASK A QUESTION about their data.
-1) If LOGGING EXPENSES (e.g. "20 tea and 60 rice", "Rohan paid 300 for dinner and 50 cab"):
-   Filter each distinct item, detect the smartest matching slot from ${JSON.stringify(ws.slots)} based on item type (e.g. tea/breakfast -> Morning, rice/lunch -> Noon, snacks -> Afternoon, dinner -> Night, or match custom slots; use "Other" if none fit).
-   Return ONLY JSON: {"mode": "log", "date": null, "paidBy": string, "items": [{"name": string, "amount": number, "slot": string}]}.
-2) If ASKING A QUESTION (e.g. "How much spent?", "Who owes whom?"):
-   Return ONLY JSON: {"mode": "answer", "reply": "Concise helpful answer in 1-2 sentences using ${getCurrency()}"}`;
+For each item, pick the smartest matching slot from ${JSON.stringify(ws.slots)} (or "Other").
+Return ONLY valid JSON: {"date": null, "paidBy": string, "items": [{"name": string, "amount": number, "slot": string}]}.`;
 
   const { text: aiReply, error } = await callGeminiAI([{ text: prompt }]);
   const parsed = extractJsonObject(aiReply);
 
-  if (parsed?.mode === "answer" && parsed.reply) {
+  const summary = await applyMultiItemAiExpense(parsed);
+  if (summary) {
     input.value = "";
-    banner.innerText = `🤖 ${parsed.reply}`;
-  } else if (parsed?.mode === "log") {
-    const summary = await applyMultiItemAiExpense(parsed);
-    if (summary) {
-      input.value = "";
-      banner.innerText = `✅ Auto-Logged: ${summary}`;
-      setTimeout(() => banner.classList.add("hidden"), 4500);
-      return;
-    }
-    banner.innerText = 'Could not detect amount. Try: "20 tea and 60 lunch"';
+    banner.innerText = `✅ Auto-Logged: ${summary}`;
+    setTimeout(() => banner.classList.add("hidden"), 4500);
   } else {
-    banner.innerText = error ? `⚠️ ${error}` : 'Try: "Paid 120 for lunch" or ask a question';
+    banner.innerText = error ? `⚠️ ${error}` : 'Try: "20 tea and 60 lunch" (or use ✨ AI Chat to ask questions)';
   }
 };
 
@@ -1428,9 +1766,9 @@ document.getElementById("aiReceiptFile").onchange = async (e) => {
   try {
     const compressed = await compressImage(file, 960, 0.84);
     const prompt = `Analyze this receipt/bill image carefully.
-Filter out tax breakdowns, subtotal lines, phone numbers, and store addresses—extract ONLY the actual purchased items (or the grand total as 1 item if individual items aren't readable).
-For each item, intelligently assign the best slot from ${JSON.stringify(ws.slots)} based on item category or meal/time context on the receipt (use "Other" if none fit).
-Also extract the receipt date in YYYY-MM-DD format if clearly printed (otherwise null).
+Filter out tax lines, subtotals, phone numbers, and store headers—extract ONLY the actual purchased items (or grand total as 1 item if line items aren't readable).
+Assign each item to the smartest matching slot from ${JSON.stringify(ws.slots)} (use "Other" if none fit).
+Also extract receipt date in YYYY-MM-DD format if clearly visible (otherwise null).
 Return ONLY valid JSON:
 {"date": "YYYY-MM-DD or null", "paidBy": "${ws.members[0]}", "items": [{"name": string, "amount": number, "slot": string}]}`;
 
@@ -1478,7 +1816,7 @@ document.getElementById("aiAuditTriggerBtn").onclick = async () => {
   banner.innerText = advice ? `💡 ${advice}` : `⚠️ ${error}`;
 };
 
-// ==================== 8. LEDGER TABLE, EDIT MODAL, SMART SPLIT & CHARTS ====================
+// ==================== 10. LEDGER TABLE, EDIT MODAL, SMART SPLIT & CHARTS ====================
 window.openEdit = (docId) => {
   const ws = getActiveWorkspace();
   const item = rawData.find((r) => r.docId === docId);
@@ -1775,7 +2113,6 @@ function updateStats(total, count, ws) {
   document.getElementById("statPerMember").innerText = `${cur}${Math.round(total / memCount)}`;
 }
 
-// Per-Entry Smart Split & UPI QR Engine
 function renderSmartSplit(ws, rows) {
   const cur = getCurrency();
   const members = ws.members || [];
@@ -1986,8 +2323,8 @@ function renderCharts() {
   });
 }
 
-// ==================== 9. CLEAN EXCEL/CSV, WHATSAPP SHARE & PDF REPORT ====================
-window.exportCSV = () => {
+// ==================== 11. CLEAN EXCEL/CSV, WHATSAPP SHARE & PDF REPORT ====================
+window.exportCSV = async () => {
   const ws = getActiveWorkspace();
   if (!ws || rawData.length === 0) return showToast("No records available to export", "error");
 
@@ -2014,10 +2351,20 @@ window.exportCSV = () => {
   footer.push("TOTAL", grandTotal);
   lines.push(footer.map(escapeCsv).join(","));
 
-  const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const fileName = `${ws.name.replace(/\s+/g, "_")}_HisabSheet_${getLocalTodayISO()}.csv`;
+  const csvBlob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const csvFile = new File([csvBlob], fileName, { type: "text/csv" });
+
+  if (navigator.canShare && navigator.canShare({ files: [csvFile] })) {
+    try {
+      await navigator.share({ files: [csvFile], title: `${ws.name} Expense Sheet` });
+      return;
+    } catch (e) {}
+  }
+
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${ws.name.replace(/\s+/g, "_")}_HisabSheet_${getLocalTodayISO()}.csv`;
+  a.href = URL.createObjectURL(csvBlob);
+  a.download = fileName;
   a.click();
   showToast("Excel/CSV Sheet downloaded!");
 };
@@ -2082,7 +2429,18 @@ window.exportPDF = async () => {
     styles: { fontSize: 8, cellPadding: 3 }
   });
 
-  docPdf.save(`${ws.name.replace(/\s+/g, "_")}_${getLocalTodayISO()}.pdf`);
+  const fileName = `${ws.name.replace(/\s+/g, "_")}_${getLocalTodayISO()}.pdf`;
+  const pdfBlob = docPdf.output("blob");
+  const pdfFile = new File([pdfBlob], fileName, { type: "application/pdf" });
+
+  if (navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
+    try {
+      await navigator.share({ files: [pdfFile], title: `${ws.name} Expense Report` });
+      return;
+    } catch (e) {}
+  }
+
+  docPdf.save(fileName);
 };
 
 function escapeHtml(str) {
