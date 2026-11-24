@@ -1,4 +1,4 @@
-// app.js — HisabCloud Pro Engine (Auto-Update Checker, Side Gemini Data Chat, Verified Auth, Auto-Calculator Lock, 10x '=' PIN Reset, Receipt Filter, CSV/PDF)
+// app.js — HisabCloud Pro Engine (Side Gemini Data Chat, Verified Auth, Auto-Calculator Lock, 10x '=' PIN Reset, Receipt Filter, CSV/PDF)
 import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
@@ -28,62 +28,6 @@ import {
   serverTimestamp,
   writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-// ==================== APP VERSION & AUTO-UPDATE CONFIG ====================
-const APP_VERSION = "1.0.1";
-const GITHUB_REPO = "ghostbyteprotocol/hisab-cloud-pro";
-
-function compareSemver(latest, current) {
-  const a = String(latest || "0").replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const b = String(current || "0").replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const len = Math.max(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if ((a[i] || 0) > (b[i] || 0)) return 1;
-    if ((a[i] || 0) < (b[i] || 0)) return -1;
-  }
-  return 0;
-}
-
-async function checkForAppUpdates(manual = false) {
-  try {
-    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
-      headers: { Accept: "application/vnd.github+json" }
-    });
-    if (!res.ok) {
-      if (manual) showToast("You are on the latest version!");
-      return;
-    }
-    const release = await res.json();
-    const latestTag = release.tag_name || "";
-    const apkAsset = (release.assets || []).find((a) => a.name.endsWith(".apk"));
-    const downloadUrl = apkAsset ? apkAsset.browser_download_url : release.html_url;
-
-    const installedTag = localStorage.getItem("hisabcloud_installed_tag");
-    if (!installedTag && !manual) {
-      if (compareSemver(latestTag, APP_VERSION) <= 0) {
-        localStorage.setItem("hisabcloud_installed_tag", latestTag || `v${APP_VERSION}`);
-        return;
-      }
-    }
-
-    const effectiveCurrent = installedTag || `v${APP_VERSION}`;
-    if (latestTag && compareSemver(latestTag, effectiveCurrent) > 0 && downloadUrl) {
-      document.getElementById("updateVersionTitle").innerText = `Update Available (${latestTag})`;
-      document.getElementById("updateReleaseNotes").innerText =
-        release.body || "A new version of HisabCloud Pro is ready. Tap below to download and install the latest APK.";
-      const dlLink = document.getElementById("updateDownloadLink");
-      dlLink.href = downloadUrl;
-      dlLink.onclick = () => {
-        localStorage.setItem("hisabcloud_installed_tag", latestTag);
-      };
-      document.getElementById("appUpdateModal").classList.add("show");
-    } else if (manual) {
-      showToast(`Up to date (${effectiveCurrent})`);
-    }
-  } catch (err) {
-    if (manual) showToast("Could not check updates right now", "error");
-  }
-}
 
 // ==================== TEMPLATES ====================
 const WORKSPACE_TEMPLATES = {
@@ -669,9 +613,6 @@ function launchDashboard(lockCalculatorOnBoot = false) {
   document.getElementById("mainAppContainer").classList.remove("hidden");
   document.getElementById("bottomNavBar").classList.remove("hidden");
 
-  const verEl = document.getElementById("currentAppVersionLabel");
-  if (verEl) verEl.innerText = localStorage.getItem("hisabcloud_installed_tag") || `v${APP_VERSION}`;
-
   if (lockCalculatorOnBoot && !initialSessionLockApplied) {
     initialSessionLockApplied = true;
     window.lockVault();
@@ -682,7 +623,6 @@ function launchDashboard(lockCalculatorOnBoot = false) {
     dashboardBooted = true;
     syncDateIfNeeded(true);
     subscribeWorkspaces();
-    checkForAppUpdates(false);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
         syncDateIfNeeded(false);
@@ -691,8 +631,6 @@ function launchDashboard(lockCalculatorOnBoot = false) {
     });
   }
 }
-
-document.getElementById("manualCheckUpdateBtn").onclick = () => checkForAppUpdates(true);
 
 function updateProfileUI() {
   if (!userProfile) return;
@@ -2514,29 +2452,3 @@ function escapeHtml(str) {
     "'": "&#39;"
   }[m]));
 }
-setTimeout(async () => {
-  try {
-    if (!auth.currentUser) return;
-    const uid = auth.currentUser.uid;
-    const wsSnap = await getDocs(collection(db, "users", uid, "workspaces"));
-    if (wsSnap.empty) {
-      const profSnap = await getDoc(doc(db, "users", uid));
-      const pData = profSnap.exists() ? profSnap.data() : {};
-      await addDoc(collection(db, "users", uid, "workspaces"), {
-        name: "My Ledger",
-        templateKey: "mess",
-        slots: ["Morning", "Noon", "Afternoon", "Night"],
-        presets: [
-          { slotIndex: 0, text: "20 (Breakfast)" },
-          { slotIndex: 1, text: "60 (Lunch)" },
-          { slotIndex: 2, text: "15 (Tea & Snacks)" },
-          { slotIndex: 3, text: "45 (Dinner)" }
-        ],
-        members: [pData.fullName || "Me"],
-        upiId: pData.upiId || "",
-        budgetLimit: 5000,
-        createdAt: serverTimestamp()
-      });
-    }
-  } catch (e) {}
-}, 2500);
