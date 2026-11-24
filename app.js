@@ -1,4 +1,4 @@
-// app.js — Hisab-Cloud Advanced Engine (Account Onboarding, Profile Photo, Gemini Vision & NLP, Charts, QR & PDF)
+// app.js — HisabCloud Pro Engine (Custom Slots, Profile Photo, Gemini Vision & NLP, Smart Split, Charts & PDF)
 import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
@@ -19,45 +19,86 @@ import {
   query,
   orderBy,
   onSnapshot,
-  serverTimestamp
+  serverTimestamp,
+  writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ==================== TEMPLATES FOR INSTANT CUSTOMIZATION ====================
+const WORKSPACE_TEMPLATES = {
+  mess: {
+    slots: ["Morning", "Noon", "Afternoon", "Night"],
+    presets: [
+      { slotIndex: 0, text: "20 (Breakfast)" },
+      { slotIndex: 1, text: "60 (Lunch)" },
+      { slotIndex: 2, text: "15 (Tea & Snacks)" },
+      { slotIndex: 3, text: "45 (Dinner)" }
+    ]
+  },
+  flat: {
+    slots: ["Groceries", "Rent & Wi-Fi", "Electricity", "Household"],
+    presets: [
+      { slotIndex: 0, text: "150 (Vegetables)" },
+      { slotIndex: 1, text: "500 (Wi-Fi Bill)" },
+      { slotIndex: 2, text: "300 (Electric)" },
+      { slotIndex: 3, text: "80 (Gas / Water)" }
+    ]
+  },
+  trip: {
+    slots: ["Food & Drinks", "Transport", "Hotel / Stay", "Tickets"],
+    presets: [
+      { slotIndex: 0, text: "250 (Group Meal)" },
+      { slotIndex: 1, text: "120 (Cab / Fuel)" },
+      { slotIndex: 2, text: "800 (Room)" },
+      { slotIndex: 3, text: "100 (Entry Pass)" }
+    ]
+  },
+  personal: {
+    slots: ["Food", "Travel", "Bills", "Shopping"],
+    presets: [
+      { slotIndex: 0, text: "50 (Meal)" },
+      { slotIndex: 1, text: "30 (Commute)" },
+      { slotIndex: 2, text: "199 (Recharge)" },
+      { slotIndex: 3, text: "200 (Essentials)" }
+    ]
+  }
+};
 
 // ==================== GLOBAL STATE ====================
 let currentUser = null;
 let userProfile = null;
 let workspaces = [];
 let activeWorkspaceId = null;
-let currentExpenses = [];
-let editingExpenseId = null;
-let unsubExpenses = null;
+let rawData = [];
+let currentActiveRows = [];
+let activeEditDocId = null;
+let weekOffset = 0;
+let lastSyncedDateStr = "";
 let unsubWorkspaces = null;
+let unsubEntries = null;
 
-let onboardingAvatarBase64 = "";
-let profileEditAvatarBase64 = "";
-let isSignUpMode = true;
+let onboardAvatarDataUrl = "";
+let profModalAvatarDataUrl = "";
+let isEmailSignUp = true;
 
-let categoryChartInstance = null;
-let memberChartInstance = null;
+let catChartInstance = null;
+let trendChartInstance = null;
+const daysOfWeek = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-// ==================== TOAST NOTIFICATION ====================
-function showToast(msg, type = "info") {
-  const container = document.getElementById("toast-container");
-  const colors =
-    type === "error"
-      ? "border-red-500/60 text-red-200"
-      : type === "success"
-      ? "border-emerald-500/60 text-emerald-200"
-      : "border-cyan-500/50 text-white";
-
-  const el = document.createElement("div");
-  el.className = `pointer-events-auto px-4 py-2.5 rounded-2xl bg-[#0d1323]/95 border ${colors} shadow-2xl backdrop-blur-xl text-xs font-semibold transition-all duration-300`;
-  el.textContent = msg;
-  container.appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+// ==================== TOAST & IMAGE COMPRESSOR ====================
+function showToast(msg, type = "success") {
+  const t = document.getElementById("toast");
+  t.innerText = msg;
+  t.style.background = type === "error" ? "#f43f5e" : "#10b981";
+  t.style.color = type === "error" ? "#fff" : "#050a0e";
+  t.style.display = "block";
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => {
+    t.style.display = "none";
+  }, 2800);
 }
+window.showToast = showToast;
 
-// ==================== IMAGE COMPRESSOR (FIXES GEMINI VISION & PROFILE PHOTO) ====================
-function compressImageFile(file, maxDim = 900, quality = 0.82) {
+function compressImage(file, maxDim = 900, quality = 0.82) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -65,9 +106,9 @@ function compressImageFile(file, maxDim = 900, quality = 0.82) {
       img.onload = () => {
         let { width, height } = img;
         if (width > maxDim || height > maxDim) {
-          const ratio = maxDim / Math.max(width, height);
-          width = Math.round(width * ratio);
-          height = Math.round(height * ratio);
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
         }
         const canvas = document.createElement("canvas");
         canvas.width = width;
@@ -75,11 +116,7 @@ function compressImageFile(file, maxDim = 900, quality = 0.82) {
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
         const dataUrl = canvas.toDataURL("image/jpeg", quality);
-        resolve({
-          dataUrl,
-          base64: dataUrl.split(",")[1],
-          mime: "image/jpeg"
-        });
+        resolve({ dataUrl, base64: dataUrl.split(",")[1], mime: "image/jpeg" });
       };
       img.onerror = reject;
       img.src = e.target.result;
@@ -89,37 +126,94 @@ function compressImageFile(file, maxDim = 900, quality = 0.82) {
   });
 }
 
-// ==================== 1. AUTHENTICATION (GOOGLE + EMAIL ACCOUNT) ====================
-const googleProvider = new GoogleAuthProvider();
+// ==================== 1. SECRET CALCULATOR & STEALTH BLUR ====================
+let calcExpression = "";
 
-document.getElementById("google-login-btn").onclick = async () => {
-  const errEl = document.getElementById("auth-error-msg");
-  errEl.classList.add("hidden");
+function getSecretPin() {
+  return userProfile?.calcPin || localStorage.getItem("hisabcloud_pin") || "2007";
+}
+
+window.calcAppend = (val) => {
+  if (calcExpression === "Error") calcExpression = "";
+  calcExpression += val;
+  document.getElementById("calcScreen").innerText = calcExpression || "0";
+};
+
+window.calcClear = () => {
+  calcExpression = "";
+  document.getElementById("calcHistory").innerText = "";
+  document.getElementById("calcScreen").innerText = "0";
+};
+
+window.calcBack = () => {
+  if (calcExpression === "Error") calcExpression = "";
+  calcExpression = calcExpression.slice(0, -1);
+  document.getElementById("calcScreen").innerText = calcExpression || "0";
+};
+
+window.calcEquals = () => {
+  if (calcExpression === getSecretPin()) {
+    window.calcClear();
+    document.getElementById("calcLockScreen").classList.add("unlocked");
+    showToast("Vault Unlocked");
+    return;
+  }
   try {
-    await signInWithPopup(auth, googleProvider);
-  } catch (err) {
-    errEl.textContent = err.message || "Google Sign-In failed.";
-    errEl.classList.remove("hidden");
+    if (!calcExpression) return;
+    document.getElementById("calcHistory").innerText = calcExpression;
+    const sanitized = calcExpression.replace(/[^0-9+\-*/.%]/g, "");
+    const result = Function('"use strict";return (' + sanitized + ")")();
+    calcExpression = String(Number.isFinite(result) ? Number(result.toFixed(6)) : "Error");
+    document.getElementById("calcScreen").innerText = calcExpression;
+  } catch (e) {
+    calcExpression = "Error";
+    document.getElementById("calcScreen").innerText = "Error";
   }
 };
 
-document.getElementById("toggle-auth-mode-btn").onclick = () => {
-  isSignUpMode = !isSignUpMode;
-  document.getElementById("auth-submit-btn").textContent = isSignUpMode ? "Create New Account" : "Sign In to Account";
-  document.getElementById("auth-mode-label").textContent = isSignUpMode
-    ? "Already have an account? Switch to Sign In"
-    : "New here? Create a new account";
+window.lockVault = () => {
+  window.calcClear();
+  document.getElementById("calcLockScreen").classList.remove("unlocked");
 };
 
-document.getElementById("email-auth-form").onsubmit = async (e) => {
+window.toggleStealthBlur = () => {
+  const isBlurred = document.body.classList.toggle("stealth-blur");
+  const btn = document.getElementById("eyeToggleBtn");
+  btn.classList.toggle("active-eye", isBlurred);
+  btn.innerText = isBlurred ? "🙈" : "👁️";
+};
+
+// ==================== 2. AUTHENTICATION (GOOGLE + EMAIL) ====================
+const googleProvider = new GoogleAuthProvider();
+
+document.getElementById("googleSignInBtn").onclick = async () => {
+  const errBox = document.getElementById("authErrorBox");
+  errBox.classList.add("hidden");
+  try {
+    await signInWithPopup(auth, googleProvider);
+  } catch (err) {
+    errBox.textContent = err.message || "Google Sign-In failed.";
+    errBox.classList.remove("hidden");
+  }
+};
+
+document.getElementById("toggleAuthModeBtn").onclick = () => {
+  isEmailSignUp = !isEmailSignUp;
+  document.getElementById("emailAuthSubmitBtn").textContent = isEmailSignUp ? "Create Account →" : "Sign In →";
+  document.getElementById("toggleAuthModeBtn").textContent = isEmailSignUp
+    ? "Already have an account? Sign In"
+    : "New user? Create a new account";
+};
+
+document.getElementById("emailAuthForm").onsubmit = async (e) => {
   e.preventDefault();
-  const email = document.getElementById("auth-email").value.trim();
-  const pass = document.getElementById("auth-password").value;
-  const errEl = document.getElementById("auth-error-msg");
-  errEl.classList.add("hidden");
+  const email = document.getElementById("authEmail").value.trim();
+  const pass = document.getElementById("authPassword").value;
+  const errBox = document.getElementById("authErrorBox");
+  errBox.classList.add("hidden");
 
   try {
-    if (isSignUpMode) {
+    if (isEmailSignUp) {
       await createUserWithEmailAndPassword(auth, email, pass);
     } else {
       await signInWithEmailAndPassword(auth, email, pass);
@@ -129,85 +223,83 @@ document.getElementById("email-auth-form").onsubmit = async (e) => {
       try {
         await signInWithEmailAndPassword(auth, email, pass);
         return;
-      } catch (loginErr) {
-        errEl.textContent = loginErr.message;
+      } catch (e2) {
+        errBox.textContent = e2.message;
       }
     } else {
-      errEl.textContent = err.message;
+      errBox.textContent = err.message;
     }
-    errEl.classList.remove("hidden");
+    errBox.classList.remove("hidden");
   }
-};
-
-document.getElementById("logout-btn").onclick = async () => {
-  document.getElementById("profile-modal").classList.add("hidden");
-  await signOut(auth);
 };
 
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
   if (!user) {
-    document.getElementById("auth-screen").classList.remove("hidden");
-    document.getElementById("onboarding-screen").classList.add("hidden");
-    document.getElementById("app-shell").classList.add("hidden");
+    document.getElementById("authScreen").classList.remove("hidden");
+    document.getElementById("onboardingScreen").classList.add("hidden");
+    document.getElementById("mainAppContainer").classList.add("hidden");
+    document.getElementById("bottomNavBar").classList.add("hidden");
     return;
   }
 
-  // Check if user has completed Real Account Setup
   const profileSnap = await getDoc(doc(db, "users", user.uid));
-  if (!profileSnap.exists() || !profileSnap.data().onboardingCompleted) {
-    openOnboardingScreen(user);
+  if (!profileSnap.exists() || !profileSnap.data().onboardingDone) {
+    openOnboarding(user);
   } else {
     userProfile = profileSnap.data();
-    enterMainDashboard();
+    launchDashboard();
   }
 });
 
-// ==================== 2. REAL ACCOUNT SETUP (ONBOARDING) ====================
-function openOnboardingScreen(user) {
-  document.getElementById("auth-screen").classList.add("hidden");
-  document.getElementById("app-shell").classList.add("hidden");
-  document.getElementById("onboarding-screen").classList.remove("hidden");
+// ==================== 3. REAL ACCOUNT PROFILE SETUP (ONBOARDING) ====================
+function openOnboarding(user) {
+  document.getElementById("authScreen").classList.add("hidden");
+  document.getElementById("mainAppContainer").classList.add("hidden");
+  document.getElementById("bottomNavBar").classList.add("hidden");
+  document.getElementById("onboardingScreen").classList.remove("hidden");
 
-  const defaultAvatar = user.photoURL || `https://api.dicebear.com/8.x/avataaars/svg?seed=${encodeURIComponent(user.uid.slice(0, 6))}`;
-  onboardingAvatarBase64 = defaultAvatar;
-  document.getElementById("onboard-avatar-preview").src = defaultAvatar;
-  document.getElementById("onboard-name").value = user.displayName || "";
-  document.getElementById("onboard-username").value = (user.email || "user").split("@")[0].replace(/[^a-zA-Z0-9_]/g, "");
+  const defaultPic = user.photoURL || `https://api.dicebear.com/8.x/avataaars/svg?seed=${user.uid.slice(0, 6)}`;
+  onboardAvatarDataUrl = defaultPic;
+  document.getElementById("onboardAvatarImg").src = defaultPic;
+  document.getElementById("onboardFullName").value = user.displayName || "";
 }
 
-document.getElementById("onboard-avatar-input").onchange = async (e) => {
+document.getElementById("onboardAvatarFile").onchange = async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const compressed = await compressImageFile(file, 256, 0.85);
-  onboardingAvatarBase64 = compressed.dataUrl;
-  document.getElementById("onboard-avatar-preview").src = compressed.dataUrl;
+  const compressed = await compressImage(file, 250, 0.85);
+  onboardAvatarDataUrl = compressed.dataUrl;
+  document.getElementById("onboardAvatarImg").src = compressed.dataUrl;
 };
 
-document.getElementById("complete-onboarding-btn").onclick = async () => {
-  const fullName = document.getElementById("onboard-name").value.trim();
-  const username = document.getElementById("onboard-username").value.trim() || "user";
-  const role = document.getElementById("onboard-role").value;
-  const currency = document.getElementById("onboard-currency").value;
-  const upiId = document.getElementById("onboard-upi").value.trim();
-  const budget = Number(document.getElementById("onboard-budget").value) || 5000;
-  const wsName = document.getElementById("onboard-ws-name").value.trim();
+document.getElementById("finishOnboardingBtn").onclick = async () => {
+  const fullName = document.getElementById("onboardFullName").value.trim();
+  const currency = document.getElementById("onboardCurrency").value;
+  const wsName = document.getElementById("onboardWsName").value.trim();
+  const templateKey = document.getElementById("onboardTemplate").value;
+  const upiId = document.getElementById("onboardUpi").value.trim();
+  const budgetLimit = Number(document.getElementById("onboardBudget").value) || 5000;
+  const membersRaw = document.getElementById("onboardMembers").value.trim();
 
   if (!fullName || !wsName) {
-    showToast("Please enter your Full Name and Workspace Name.", "error");
+    showToast("Enter your Name and Workspace Name", "error");
     return;
   }
+
+  const extraMembers = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
+  const members = Array.from(new Set([fullName, ...extraMembers]));
+  const tpl = WORKSPACE_TEMPLATES[templateKey] || WORKSPACE_TEMPLATES.mess;
 
   userProfile = {
     uid: currentUser.uid,
     email: currentUser.email,
     fullName,
-    username,
-    bio: role,
     currency,
     upiId,
-    photoUrl: onboardingAvatarBase64,
-    onboardingCompleted: true,
+    photoUrl: onboardAvatarDataUrl,
+    calcPin: "2007",
+    onboardingDone: true,
     createdAt: serverTimestamp()
   };
 
@@ -215,105 +307,125 @@ document.getElementById("complete-onboarding-btn").onclick = async () => {
 
   await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
     name: wsName,
-    members: [fullName],
-    categories: ["Food & Groceries", "Rent & Bills", "Utilities", "Travel", "Shopping", "Other"],
+    slots: tpl.slots,
+    presets: tpl.presets,
+    members,
     upiId,
-    budgetLimit: budget,
+    budgetLimit,
     createdAt: serverTimestamp()
   });
 
-  showToast("Account created successfully!", "success");
-  enterMainDashboard();
+  showToast("Account & Workspace Created!");
+  launchDashboard();
 };
 
-function enterMainDashboard() {
-  document.getElementById("auth-screen").classList.add("hidden");
-  document.getElementById("onboarding-screen").classList.add("hidden");
-  document.getElementById("app-shell").classList.remove("hidden");
+function launchDashboard() {
+  document.getElementById("authScreen").classList.add("hidden");
+  document.getElementById("onboardingScreen").classList.add("hidden");
+  document.getElementById("mainAppContainer").classList.remove("hidden");
+  document.getElementById("bottomNavBar").classList.remove("hidden");
 
-  syncHeaderProfileUI();
+  syncDateIfNeeded(true);
+  updateProfileUI();
   subscribeWorkspaces();
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      syncDateIfNeeded(false);
+      renderTable();
+    }
+  });
 }
 
-function syncHeaderProfileUI() {
+function updateProfileUI() {
   if (!userProfile) return;
-  document.getElementById("header-avatar").src =
+  document.getElementById("topbarAvatarImg").src =
     userProfile.photoUrl || "https://api.dicebear.com/8.x/avataaars/svg?seed=User";
 }
 
-// ==================== 3. USER PROFILE & SETTINGS MODAL ====================
-function openProfileSettingsModal() {
-  if (!userProfile) return;
-  profileEditAvatarBase64 = userProfile.photoUrl || "";
-  document.getElementById("prof-avatar-preview").src = profileEditAvatarBase64;
-  document.getElementById("prof-email").textContent = currentUser.email || "";
-  document.getElementById("prof-name").value = userProfile.fullName || "";
-  document.getElementById("prof-username").value = userProfile.username || "";
-  document.getElementById("prof-upi").value = userProfile.upiId || "";
-  document.getElementById("prof-currency").value = userProfile.currency || "₹";
-  document.getElementById("prof-bio").value = userProfile.bio || "";
-  document.getElementById("prof-gemini-key").value = localStorage.getItem("hisab_custom_gemini_key") || "";
-
-  document.getElementById("profile-modal").classList.remove("hidden");
+function getCurrency() {
+  return userProfile?.currency || "₹";
 }
 
-document.getElementById("open-profile-btn").onclick = openProfileSettingsModal;
-document.getElementById("open-settings-icon-btn").onclick = openProfileSettingsModal;
-document.getElementById("close-profile-modal").onclick = () => {
-  document.getElementById("profile-modal").classList.add("hidden");
+// ==================== 4. PROFILE & ACCOUNT SETTINGS MODAL ====================
+window.openProfileSettings = () => {
+  if (!userProfile) return;
+  profModalAvatarDataUrl = userProfile.photoUrl || "";
+  document.getElementById("profModalAvatarImg").src = profModalAvatarDataUrl;
+  document.getElementById("profModalEmail").innerText = currentUser.email || "";
+  document.getElementById("profModalName").value = userProfile.fullName || "";
+  document.getElementById("profModalCurrency").value = userProfile.currency || "₹";
+  document.getElementById("profModalUpi").value = userProfile.upiId || "";
+  document.getElementById("profModalPin").value = userProfile.calcPin || "";
+  document.getElementById("profModalGeminiKey").value = localStorage.getItem("hisabcloud_custom_gemini_key") || "";
+  document.getElementById("profileModal").classList.add("show");
 };
 
-document.getElementById("prof-avatar-input").onchange = async (e) => {
+document.getElementById("openProfileModalBtn").onclick = window.openProfileSettings;
+
+window.closeProfileModal = () => {
+  document.getElementById("profileModal").classList.remove("show");
+};
+
+document.getElementById("profModalAvatarFile").onchange = async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const compressed = await compressImageFile(file, 256, 0.85);
-  profileEditAvatarBase64 = compressed.dataUrl;
-  document.getElementById("prof-avatar-preview").src = compressed.dataUrl;
+  const compressed = await compressImage(file, 250, 0.85);
+  profModalAvatarDataUrl = compressed.dataUrl;
+  document.getElementById("profModalAvatarImg").src = compressed.dataUrl;
 };
 
-document.getElementById("save-profile-btn").onclick = async () => {
-  const fullName = document.getElementById("prof-name").value.trim() || userProfile.fullName;
-  const username = document.getElementById("prof-username").value.trim() || userProfile.username;
-  const upiId = document.getElementById("prof-upi").value.trim();
-  const currency = document.getElementById("prof-currency").value;
-  const bio = document.getElementById("prof-bio").value.trim();
-  const customKey = document.getElementById("prof-gemini-key").value.trim();
+document.getElementById("saveProfileSettingsBtn").onclick = async () => {
+  const fullName = document.getElementById("profModalName").value.trim() || userProfile.fullName;
+  const currency = document.getElementById("profModalCurrency").value;
+  const upiId = document.getElementById("profModalUpi").value.trim();
+  const pinVal = document.getElementById("profModalPin").value.trim();
+  const customGemini = document.getElementById("profModalGeminiKey").value.trim();
 
-  if (customKey) localStorage.setItem("hisab_custom_gemini_key", customKey);
-  else localStorage.removeItem("hisab_custom_gemini_key");
+  if (pinVal && !/^\d{3,8}$/.test(pinVal)) {
+    showToast("Calculator PIN must be 3 to 8 digits", "error");
+    return;
+  }
+
+  if (customGemini) localStorage.setItem("hisabcloud_custom_gemini_key", customGemini);
+  else localStorage.removeItem("hisabcloud_custom_gemini_key");
 
   userProfile = {
     ...userProfile,
     fullName,
-    username,
-    upiId,
     currency,
-    bio,
-    photoUrl: profileEditAvatarBase64
+    upiId,
+    photoUrl: profModalAvatarDataUrl,
+    calcPin: pinVal || userProfile.calcPin || "2007"
   };
 
   await setDoc(doc(db, "users", currentUser.uid), userProfile, { merge: true });
-  syncHeaderProfileUI();
-  recalculateAndRenderAll();
-  document.getElementById("profile-modal").classList.add("hidden");
-  showToast("Profile & Settings updated!", "success");
+  updateProfileUI();
+  renderTable();
+  window.closeProfileModal();
+  showToast("Profile & Settings Saved!");
 };
 
-document.getElementById("export-json-btn").onclick = () => {
+document.getElementById("exportBackupJsonBtn").onclick = () => {
   const backup = {
     exportedAt: new Date().toISOString(),
     profile: userProfile,
-    activeWorkspace: getActiveWorkspace(),
-    expenses: currentExpenses
+    workspace: getActiveWorkspace(),
+    records: rawData
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `HisabCloud_Backup_${Date.now()}.json`;
+  a.download = `HisabCloud_Backup_${getLocalTodayISO()}.json`;
   a.click();
 };
 
-// ==================== 4. WORKSPACES & CUSTOMIZATION ====================
+document.getElementById("signOutAccountBtn").onclick = async () => {
+  window.closeProfileModal();
+  await signOut(auth);
+};
+
+// ==================== 5. WORKSPACES & FULL CUSTOMIZATION ====================
 function subscribeWorkspaces() {
   if (unsubWorkspaces) unsubWorkspaces();
   const q = query(collection(db, "users", currentUser.uid, "workspaces"), orderBy("createdAt", "asc"));
@@ -322,10 +434,12 @@ function subscribeWorkspaces() {
     snap.forEach((d) => workspaces.push({ id: d.id, ...d.data() }));
 
     if (workspaces.length === 0) {
+      const tpl = WORKSPACE_TEMPLATES.mess;
       await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
-        name: "My Shared Space",
+        name: "My Ledger",
+        slots: tpl.slots,
+        presets: tpl.presets,
         members: [userProfile.fullName || "Me"],
-        categories: ["Food & Groceries", "Rent & Bills", "Utilities", "Travel", "Other"],
         upiId: userProfile.upiId || "",
         budgetLimit: 5000,
         createdAt: serverTimestamp()
@@ -346,24 +460,15 @@ function getActiveWorkspace() {
   return workspaces.find((w) => w.id === activeWorkspaceId) || workspaces[0];
 }
 
-function getCurrency() {
-  return userProfile?.currency || "₹";
-}
-
 function renderWorkspaceDropdown() {
-  const sel = document.getElementById("workspace-select");
-  sel.innerHTML = "";
-  workspaces.forEach((ws) => {
-    const opt = document.createElement("option");
-    opt.value = ws.id;
-    opt.textContent = ws.name;
-    opt.className = "bg-[#0d1220] text-white";
-    sel.appendChild(opt);
-  });
+  const sel = document.getElementById("workspaceSelect");
+  sel.innerHTML = workspaces
+    .map((ws) => `<option value="${ws.id}">${escapeHtml(ws.name)}</option>`)
+    .join("");
   sel.value = activeWorkspaceId;
 }
 
-document.getElementById("workspace-select").onchange = (e) => {
+document.getElementById("workspaceSelect").onchange = (e) => {
   activeWorkspaceId = e.target.value;
   loadActiveWorkspace();
 };
@@ -372,510 +477,458 @@ function loadActiveWorkspace() {
   const ws = getActiveWorkspace();
   if (!ws) return;
 
-  document.getElementById("workspace-subtitle").textContent = `@${userProfile.username} • ${ws.members.length} Members`;
-  document.getElementById("custom-ws-name").value = ws.name || "";
-  document.getElementById("custom-ws-upi").value = ws.upiId || "";
-  document.getElementById("custom-ws-budget").value = ws.budgetLimit || 5000;
+  document.getElementById("topbarSubtitle").innerText = `${userProfile.fullName} • ${ws.members.length} Member(s)`;
+  document.getElementById("editWsNameInput").value = ws.name || "";
+  document.getElementById("editWsUpiInput").value = ws.upiId || "";
 
-  // Populate Filter Dropdown
-  const filterSel = document.getElementById("filter-category-select");
-  const prevFilter = filterSel.value;
-  filterSel.innerHTML = `<option value="ALL">All Categories</option>` +
-    (ws.categories || []).map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
-  if ([...filterSel.options].some((o) => o.value === prevFilter)) filterSel.value = prevFilter;
+  renderDynamicEntryForm(ws);
+  renderCustomizationTab(ws);
 
-  renderCustomizeLists(ws);
-
-  if (unsubExpenses) unsubExpenses();
+  if (unsubEntries) unsubEntries();
   const q = query(
-    collection(db, "users", currentUser.uid, "workspaces", ws.id, "expenses"),
+    collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"),
     orderBy("createdAt", "desc")
   );
-  unsubExpenses = onSnapshot(q, (snap) => {
-    currentExpenses = [];
-    snap.forEach((d) => currentExpenses.push({ id: d.id, ...d.data() }));
-    recalculateAndRenderAll();
+  unsubEntries = onSnapshot(q, (snap) => {
+    rawData = [];
+    snap.forEach((d) => rawData.push({ docId: d.id, ...d.data() }));
+    loadEntryForSelectedDate();
+    renderTable();
   });
 }
 
-// New Workspace Modal
-document.getElementById("new-workspace-btn").onclick = () => {
-  document.getElementById("workspace-modal").classList.remove("hidden");
+// Create New Workspace Modal
+document.getElementById("openNewWsModalBtn").onclick = () => {
+  document.getElementById("newWsModal").classList.add("show");
 };
-document.getElementById("close-ws-modal").onclick = () => {
-  document.getElementById("workspace-modal").classList.add("hidden");
+window.closeNewWsModal = () => {
+  document.getElementById("newWsModal").classList.remove("show");
 };
-document.getElementById("create-ws-submit-btn").onclick = async () => {
-  const name = document.getElementById("ws-create-name").value.trim();
-  const membersRaw = document.getElementById("ws-create-members").value.trim();
-  const budgetLimit = Number(document.getElementById("ws-create-budget").value) || 5000;
-  if (!name) return;
+document.getElementById("createNewWsSubmitBtn").onclick = async () => {
+  const name = document.getElementById("newWsNameInput").value.trim();
+  const tplKey = document.getElementById("newWsTemplateSelect").value;
+  const membersRaw = document.getElementById("newWsMembersInput").value.trim();
+  if (!name) return showToast("Enter a workspace name", "error");
 
-  const extraMembers = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
-  const members = Array.from(new Set([userProfile.fullName, ...extraMembers]));
+  const extra = membersRaw ? membersRaw.split(",").map((m) => m.trim()).filter(Boolean) : [];
+  const members = Array.from(new Set([userProfile.fullName, ...extra]));
+  const tpl = WORKSPACE_TEMPLATES[tplKey] || WORKSPACE_TEMPLATES.mess;
 
   const ref = await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
     name,
+    slots: tpl.slots,
+    presets: tpl.presets,
     members,
-    categories: ["Food & Groceries", "Rent & Bills", "Utilities", "Travel", "Shopping", "Other"],
     upiId: userProfile.upiId || "",
-    budgetLimit,
+    budgetLimit: 5000,
     createdAt: serverTimestamp()
   });
 
   activeWorkspaceId = ref.id;
-  document.getElementById("ws-create-name").value = "";
-  document.getElementById("ws-create-members").value = "";
-  document.getElementById("workspace-modal").classList.add("hidden");
-  showToast(`Workspace "${name}" created!`, "success");
+  document.getElementById("newWsNameInput").value = "";
+  document.getElementById("newWsMembersInput").value = "";
+  window.closeNewWsModal();
+  showToast(`Created "${name}"`);
 };
 
-function renderCustomizeLists(ws) {
-  const membersEl = document.getElementById("custom-members-list");
-  membersEl.innerHTML = "";
-  (ws.members || []).forEach((m) => {
+// Render Customizable Entry Form Slots & Presets
+function renderDynamicEntryForm(ws) {
+  const slots = ws.slots || ["Morning", "Noon", "Afternoon", "Night"];
+  const presets = ws.presets || [];
+  const members = ws.members || [userProfile.fullName];
+
+  // Paid By dropdown
+  const paidSel = document.getElementById("entryPaidBy");
+  paidSel.innerHTML = members.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+
+  // Quick Presets Chips
+  const presetsBar = document.getElementById("quickPresetsBar");
+  presetsBar.innerHTML = "";
+  presets.forEach((p) => {
+    const slotName = slots[p.slotIndex] || slots[0];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "preset-chip";
+    btn.innerText = `+ ${getCurrency()}${p.text}`;
+    btn.onclick = () => {
+      const targetInput = document.getElementById(`slot_input_${p.slotIndex}`);
+      if (targetInput) {
+        targetInput.value = p.text;
+        calcPreview();
+        showToast(`Added ${p.text} to ${slotName}`);
+      }
+    };
+    presetsBar.appendChild(btn);
+  });
+
+  // Dynamic Slots Inputs
+  const grid = document.getElementById("dynamicSlotsGrid");
+  grid.innerHTML = "";
+  slots.forEach((slotLabel, idx) => {
+    const field = document.createElement("div");
+    field.className = "field";
+    field.innerHTML = `
+      <label>${escapeHtml(slotLabel)}</label>
+      <input type="text" class="smart-input slot-val-input blur-sensitive" id="slot_input_${idx}" data-slot="${escapeHtml(slotLabel)}" placeholder="e.g. 50 (${escapeHtml(slotLabel)})" />
+    `;
+    grid.appendChild(field);
+    attachSmartListener(field.querySelector("input"));
+  });
+
+  resetOthersContainer("othersContainer", []);
+}
+
+// Render Customization Tab Controls
+function renderCustomizationTab(ws) {
+  const slots = ws.slots || [];
+  const presets = ws.presets || [];
+  const members = ws.members || [];
+
+  // Custom Slots Chips
+  const slotsWrap = document.getElementById("customSlotsChips");
+  slotsWrap.innerHTML = "";
+  slots.forEach((s, idx) => {
     const chip = document.createElement("span");
-    chip.className = "inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-200 font-semibold";
-    chip.innerHTML = `${escapeHtml(m)} <button type="button" class="text-emerald-400 hover:text-red-400"><i class="fa-solid fa-xmark"></i></button>`;
+    chip.className = "tag-chip";
+    chip.innerHTML = `${escapeHtml(s)} <button type="button" title="Remove">✕</button>`;
     chip.querySelector("button").onclick = async () => {
-      if (ws.members.length <= 1) return showToast("At least 1 member is required.", "error");
-      const updated = ws.members.filter((item) => item !== m);
+      if (slots.length <= 1) return showToast("Keep at least 1 slot", "error");
+      const updated = slots.filter((_, i) => i !== idx);
+      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { slots: updated });
+    };
+    slotsWrap.appendChild(chip);
+  });
+
+  // Preset Target Slot Selector & Chips
+  const targetSlotSel = document.getElementById("presetTargetSlot");
+  targetSlotSel.innerHTML = slots.map((s, idx) => `<option value="${idx}">${escapeHtml(s)}</option>`).join("");
+
+  const presetsWrap = document.getElementById("customPresetsChips");
+  presetsWrap.innerHTML = "";
+  presets.forEach((p, idx) => {
+    const sName = slots[p.slotIndex] || slots[0];
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.innerHTML = `<span style="color:var(--cyan);">${escapeHtml(sName)}:</span> ${escapeHtml(p.text)} <button type="button">✕</button>`;
+    chip.querySelector("button").onclick = async () => {
+      const updated = presets.filter((_, i) => i !== idx);
+      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { presets: updated });
+    };
+    presetsWrap.appendChild(chip);
+  });
+
+  // Members Chips
+  const memWrap = document.getElementById("customMembersChips");
+  memWrap.innerHTML = "";
+  members.forEach((m) => {
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.innerHTML = `${escapeHtml(m)} <button type="button">✕</button>`;
+    chip.querySelector("button").onclick = async () => {
+      if (members.length <= 1) return showToast("Keep at least 1 member", "error");
+      const updated = members.filter((item) => item !== m);
       await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { members: updated });
     };
-    membersEl.appendChild(chip);
-  });
-
-  const catsEl = document.getElementById("custom-categories-list");
-  catsEl.innerHTML = "";
-  (ws.categories || []).forEach((c) => {
-    const chip = document.createElement("span");
-    chip.className = "inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-xs text-amber-200 font-semibold";
-    chip.innerHTML = `${escapeHtml(c)} <button type="button" class="text-amber-400 hover:text-red-400"><i class="fa-solid fa-xmark"></i></button>`;
-    chip.querySelector("button").onclick = async () => {
-      if (ws.categories.length <= 1) return;
-      const updated = ws.categories.filter((item) => item !== c);
-      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { categories: updated });
-    };
-    catsEl.appendChild(chip);
+    memWrap.appendChild(chip);
   });
 }
 
-document.getElementById("save-ws-settings-btn").onclick = async () => {
+document.getElementById("addSlotBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const inp = document.getElementById("newSlotInput");
+  const val = inp.value.trim();
+  if (!ws || !val) return;
+  if ((ws.slots || []).length >= 6) return showToast("Maximum 6 slots allowed", "error");
+  if ((ws.slots || []).includes(val)) return showToast("Slot already exists", "error");
+  inp.value = "";
+  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
+    slots: [...(ws.slots || []), val]
+  });
+  showToast(`Added "${val}" slot`);
+};
+
+document.getElementById("addPresetBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const slotIndex = Number(document.getElementById("presetTargetSlot").value) || 0;
+  const val = document.getElementById("newPresetValue").value.trim();
+  if (!ws || !val) return;
+  document.getElementById("newPresetValue").value = "";
+  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
+    presets: [...(ws.presets || []), { slotIndex, text: val }]
+  });
+  showToast("Quick preset added");
+};
+
+document.getElementById("addMemberBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const inp = document.getElementById("newMemberInput");
+  const val = inp.value.trim();
+  if (!ws || !val || (ws.members || []).includes(val)) return;
+  inp.value = "";
+  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
+    members: [...(ws.members || []), val]
+  });
+  showToast(`Added member ${val}`);
+};
+
+document.getElementById("saveWsInfoBtn").onclick = async () => {
   const ws = getActiveWorkspace();
   if (!ws) return;
-  const name = document.getElementById("custom-ws-name").value.trim() || ws.name;
-  const upiId = document.getElementById("custom-ws-upi").value.trim();
-  const budgetLimit = Number(document.getElementById("custom-ws-budget").value) || 5000;
-  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { name, upiId, budgetLimit });
-  showToast("Workspace settings saved!", "success");
+  const name = document.getElementById("editWsNameInput").value.trim() || ws.name;
+  const upiId = document.getElementById("editWsUpiInput").value.trim();
+  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { name, upiId });
+  showToast("Workspace updated!");
 };
 
-document.getElementById("add-member-btn").onclick = async () => {
+document.getElementById("deleteWsBtn").onclick = async () => {
   const ws = getActiveWorkspace();
-  const input = document.getElementById("new-member-input");
-  const val = input.value.trim();
-  if (!ws || !val || ws.members.includes(val)) return;
-  input.value = "";
-  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
-    members: [...ws.members, val]
-  });
-  showToast(`Added ${val}`, "success");
-};
-
-document.getElementById("add-category-btn").onclick = async () => {
-  const ws = getActiveWorkspace();
-  const input = document.getElementById("new-category-input");
-  const val = input.value.trim();
-  if (!ws || !val || ws.categories.includes(val)) return;
-  input.value = "";
-  await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), {
-    categories: [...ws.categories, val]
-  });
-  showToast(`Category "${val}" added`, "success");
-};
-
-document.getElementById("delete-workspace-btn").onclick = async () => {
-  const ws = getActiveWorkspace();
-  if (!ws || workspaces.length <= 1) {
-    showToast("You must keep at least one workspace.", "error");
-    return;
-  }
+  if (!ws || workspaces.length <= 1) return showToast("Cannot delete your only workspace", "error");
+  if (!confirm(`Delete "${ws.name}" permanently?`)) return;
   await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id));
   activeWorkspaceId = null;
-  showToast("Workspace deleted", "info");
+  showToast("Workspace deleted");
 };
 
-// ==================== 5. EXPENSE CRUD & SEARCH/FILTER ====================
-document.getElementById("search-expense-input").oninput = () => recalculateAndRenderAll();
-document.getElementById("filter-category-select").onchange = () => recalculateAndRenderAll();
+// ==================== 6. SMART INPUT & ENTRY LOGIC (FROM POCKETLEDGER PRO) ====================
+window.switchTab = (tabName, el) => {
+  document.querySelectorAll(".tab-view").forEach((v) => v.classList.remove("active"));
+  document.querySelectorAll(".nav-tab").forEach((t) => t.classList.remove("active"));
+  document.getElementById(`tab-${tabName}`).classList.add("active");
+  el.classList.add("active");
+  if (tabName === "analytics") renderCharts();
+};
 
-function openExpenseModal(expense = null) {
-  const ws = getActiveWorkspace();
-  if (!ws) return;
-
-  editingExpenseId = expense ? expense.id : null;
-  document.getElementById("expense-modal-title").textContent = expense ? "Edit Expense" : "Add Expense";
-  document.getElementById("exp-title-input").value = expense ? expense.title : "";
-  document.getElementById("exp-amount-input").value = expense ? expense.amount : "";
-  document.getElementById("exp-date-input").value = expense?.date || new Date().toISOString().split("T")[0];
-  document.getElementById("exp-notes-input").value = expense?.notes || "";
-
-  const catSel = document.getElementById("exp-category-select");
-  catSel.innerHTML = ws.categories.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
-  if (expense?.category) catSel.value = expense.category;
-
-  const paidSel = document.getElementById("exp-paidby-select");
-  paidSel.innerHTML = ws.members.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-  if (expense?.paidBy) paidSel.value = expense.paidBy;
-
-  const splitWrap = document.getElementById("exp-split-checkboxes");
-  const activeSplits = expense?.splitBetween || ws.members;
-  splitWrap.innerHTML = ws.members
-    .map(
-      (m) => `
-      <label class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl glass-input text-xs text-slate-200 cursor-pointer">
-        <input type="checkbox" value="${escapeHtml(m)}" class="split-member-cb accent-cyan-400" ${activeSplits.includes(m) ? "checked" : ""} />
-        <span>${escapeHtml(m)}</span>
-      </label>`
-    )
-    .join("");
-
-  document.getElementById("expense-modal").classList.remove("hidden");
+function getLocalTodayISO() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
-document.getElementById("open-manual-expense-btn").onclick = () => openExpenseModal(null);
-document.getElementById("close-expense-modal").onclick = () => {
-  document.getElementById("expense-modal").classList.add("hidden");
+function syncDateIfNeeded(force = false) {
+  const currentLocalDate = getLocalTodayISO();
+  const dateInput = document.getElementById("entryDate");
+  const changed = force || !dateInput.value || dateInput.value === lastSyncedDateStr;
+  if (changed && dateInput.value !== currentLocalDate) {
+    dateInput.value = currentLocalDate;
+    loadEntryForSelectedDate();
+  } else if (!dateInput.value) {
+    dateInput.value = currentLocalDate;
+  }
+  lastSyncedDateStr = currentLocalDate;
+}
+
+function cleanItemText(str) {
+  return String(str || "").replace(/\s*\(\s*\)/g, "").trim();
+}
+
+function extractAmount(str) {
+  if (!str || str === "-") return 0;
+  const matches = String(str).match(/\d+(\.\d+)?/g);
+  if (!matches) return 0;
+  return matches.reduce((sum, num) => sum + parseFloat(num), 0);
+}
+
+function attachSmartListener(input) {
+  input.addEventListener("input", function (e) {
+    const val = this.value;
+    const pos = this.selectionStart;
+    if (e.inputType === "insertText" && e.data === " ") {
+      const beforeCursor = val.slice(0, pos);
+      if (/^\s*\d+(\.\d+)?\s$/.test(beforeCursor) && !val.includes("(")) {
+        const numPart = beforeCursor.trim();
+        const afterCursor = val.slice(pos);
+        this.value = numPart + " ()" + afterCursor;
+        const newPos = numPart.length + 2;
+        this.setSelectionRange(newPos, newPos);
+      }
+    }
+    calcPreview();
+  });
+}
+
+function calcPreview() {
+  let total = 0;
+  document.querySelectorAll(".slot-val-input").forEach((inp) => {
+    total += extractAmount(inp.value);
+  });
+  const otherData = getDynamicOthers("othersContainer");
+  total += otherData.total;
+  document.getElementById("liveTotal").innerText = `${getCurrency()}${total}`;
+}
+window.calcPreview = calcPreview;
+
+window.addOtherInput = (containerId, val = "") => {
+  const container = document.getElementById(containerId);
+  const div = document.createElement("div");
+  div.className = "other-row";
+  div.innerHTML = `
+    <input type="text" class="other-item smart-input blur-sensitive" value="${escapeHtml(val)}" placeholder="e.g. 50 (Extra)">
+    <button type="button" class="btn-del-item" onclick="this.parentElement.remove(); calcPreview();">✕</button>
+  `;
+  container.appendChild(div);
+  attachSmartListener(div.querySelector("input"));
 };
 
-document.getElementById("save-expense-btn").onclick = async () => {
+function resetOthersContainer(containerId, items = []) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (items.length === 0) {
+    const div = document.createElement("div");
+    div.className = "other-row";
+    div.innerHTML = `<input type="text" class="other-item smart-input blur-sensitive" placeholder="e.g. 20 (Extra Item)">`;
+    container.appendChild(div);
+    attachSmartListener(div.querySelector("input"));
+  } else {
+    items.forEach((val, idx) => {
+      if (idx === 0) {
+        const div = document.createElement("div");
+        div.className = "other-row";
+        div.innerHTML = `<input type="text" class="other-item smart-input blur-sensitive" value="${escapeHtml(val)}">`;
+        container.appendChild(div);
+        attachSmartListener(div.querySelector("input"));
+      } else {
+        window.addOtherInput(containerId, val);
+      }
+    });
+  }
+}
+
+function getDynamicOthers(containerId) {
+  const inputs = document.querySelectorAll(`#${containerId} .other-item`);
+  const items = [];
+  let total = 0;
+  inputs.forEach((inp) => {
+    const val = cleanItemText(inp.value);
+    if (val) {
+      items.push(val);
+      total += extractAmount(val);
+    }
+  });
+  return { text: items.join(", "), total };
+}
+
+function formatDateWithDay(isoDate) {
+  if (!isoDate) return "";
+  const parts = isoDate.split("-");
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  return `${parts[2]}/${parts[1]}/${parts[0]} (${daysOfWeek[d.getDay()]})`;
+}
+
+function parseEntryDate(dateStr) {
+  const datePart = String(dateStr || "").split(" ")[0];
+  const parts = datePart.split("/");
+  if (parts.length !== 3) return new Date(0);
+  return new Date(parts[2], parts[1] - 1, parts[0]);
+}
+
+window.loadEntryForSelectedDate = () => {
   const ws = getActiveWorkspace();
-  if (!ws) return;
+  const isoDate = document.getElementById("entryDate").value;
+  const banner = document.getElementById("existingSyncBanner");
+  const saveBtn = document.getElementById("saveBtn");
 
-  const title = document.getElementById("exp-title-input").value.trim() || "Shared Expense";
-  const amount = parseFloat(document.getElementById("exp-amount-input").value);
-  const category = document.getElementById("exp-category-select").value;
-  const paidBy = document.getElementById("exp-paidby-select").value;
-  const date = document.getElementById("exp-date-input").value || new Date().toISOString().split("T")[0];
-  const notes = document.getElementById("exp-notes-input").value.trim();
-  const splitBetween = Array.from(document.querySelectorAll(".split-member-cb:checked")).map((cb) => cb.value);
+  if (!ws || !isoDate) return;
+  const dateFormatted = formatDateWithDay(isoDate);
+  const existing = rawData.find((r) => r.date === dateFormatted);
 
-  if (!amount || amount <= 0 || splitBetween.length === 0) {
-    showToast("Enter a valid amount and select at least 1 member.", "error");
-    return;
+  const slots = ws.slots || [];
+  if (existing) {
+    activeEditDocId = existing.docId;
+    if (existing.paidBy) document.getElementById("entryPaidBy").value = existing.paidBy;
+
+    slots.forEach((slotName, idx) => {
+      const inp = document.getElementById(`slot_input_${idx}`);
+      if (inp) {
+        const val = existing.slotValues?.[slotName] || "";
+        inp.value = val === "-" ? "" : val;
+      }
+    });
+
+    if (existing.other && existing.other !== "-") {
+      const parts = existing.other.split(",").map((p) => p.trim()).filter(Boolean);
+      resetOthersContainer("othersContainer", parts);
+    } else {
+      resetOthersContainer("othersContainer", []);
+    }
+
+    document.getElementById("syncBannerText").innerText = `✏️ Loaded ${dateFormatted.split(" ")[0]} — add/edit & update`;
+    banner.classList.add("show");
+    saveBtn.innerText = "Update Entry →";
+    saveBtn.classList.add("update-mode");
+  } else {
+    activeEditDocId = null;
+    slots.forEach((_, idx) => {
+      const inp = document.getElementById(`slot_input_${idx}`);
+      if (inp) inp.value = "";
+    });
+    resetOthersContainer("othersContainer", []);
+
+    banner.classList.remove("show");
+    saveBtn.innerText = "Save Entry →";
+    saveBtn.classList.remove("update-mode");
+  }
+  calcPreview();
+};
+
+window.submitExpense = async () => {
+  const ws = getActiveWorkspace();
+  const btn = document.getElementById("saveBtn");
+  const isoDate = document.getElementById("entryDate").value;
+  if (!ws || !isoDate) return showToast("Select a valid date", "error");
+
+  const dateFormatted = formatDateWithDay(isoDate);
+  const paidBy = document.getElementById("entryPaidBy").value || ws.members[0];
+  const slotValues = {};
+  let slotSum = 0;
+
+  (ws.slots || []).forEach((slotName, idx) => {
+    const inp = document.getElementById(`slot_input_${idx}`);
+    const cleaned = cleanItemText(inp ? inp.value : "");
+    slotValues[slotName] = cleaned;
+    slotSum += extractAmount(cleaned);
+  });
+
+  const otherData = getDynamicOthers("othersContainer");
+  const total = slotSum + otherData.total;
+
+  if (total === 0 && Object.values(slotValues).every((v) => !v) && !otherData.text) {
+    return showToast("Enter at least one expense item", "error");
   }
 
-  const payload = {
-    title,
-    amount,
-    category,
+  const existingRecord = rawData.find((r) => r.date === dateFormatted);
+  const targetDocId = activeEditDocId || (existingRecord ? existingRecord.docId : null);
+
+  btn.innerText = targetDocId ? "Updating..." : "Saving...";
+  btn.disabled = true;
+
+  const entryPayload = {
+    date: dateFormatted,
     paidBy,
-    date,
-    notes,
-    splitBetween,
+    slotValues,
+    other: otherData.text,
+    total,
     updatedAt: serverTimestamp()
   };
 
-  if (editingExpenseId) {
-    await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "expenses", editingExpenseId), payload);
-    showToast("Expense updated", "success");
-  } else {
-    payload.createdAt = serverTimestamp();
-    await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "expenses"), payload);
-    showToast("Expense added!", "success");
+  try {
+    if (targetDocId) {
+      await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", targetDocId), entryPayload);
+      showToast("Day entry updated!");
+    } else {
+      entryPayload.createdAt = serverTimestamp();
+      await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"), entryPayload);
+      showToast("Entry saved to cloud!");
+    }
+  } catch (err) {
+    showToast("Save failed: " + err.message, "error");
+  } finally {
+    btn.disabled = false;
   }
-
-  document.getElementById("expense-modal").classList.add("hidden");
 };
 
-// ==================== 6. SMART SPLIT, CHARTS & RENDERING ====================
-function recalculateAndRenderAll() {
-  const ws = getActiveWorkspace();
-  if (!ws) return;
-  const cur = getCurrency();
-
-  const totalSpent = currentExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const memberCount = ws.members.length || 1;
-  const perHead = totalSpent / memberCount;
-
-  document.getElementById("stat-total-spent").textContent = `${cur}${totalSpent.toFixed(0)}`;
-  document.getElementById("stat-per-head").textContent = `${cur}${perHead.toFixed(0)}`;
-  document.getElementById("stat-member-count").textContent = String(memberCount);
-
-  // Update Monthly Budget Progress Bar
-  const budgetLimit = Number(ws.budgetLimit) || 5000;
-  const pct = Math.min(100, Math.round((totalSpent / budgetLimit) * 100));
-  document.getElementById("budget-text").textContent = `${cur}${totalSpent.toFixed(0)} / ${cur}${budgetLimit}`;
-  const barFill = document.getElementById("budget-bar-fill");
-  barFill.style.width = `${pct}%`;
-  barFill.className =
-    pct >= 90
-      ? "h-full rounded-full bg-gradient-to-r from-rose-500 to-red-500 transition-all duration-500"
-      : pct >= 70
-      ? "h-full rounded-full bg-gradient-to-r from-amber-400 to-orange-500 transition-all duration-500"
-      : "h-full rounded-full bg-gradient-to-r from-emerald-400 to-cyan-400 transition-all duration-500";
-
-  // Filter Expenses for List
-  const searchTerm = (document.getElementById("search-expense-input").value || "").trim().toLowerCase();
-  const filterCat = document.getElementById("filter-category-select").value;
-  const filteredExpenses = currentExpenses.filter((exp) => {
-    const matchesCat = filterCat === "ALL" || exp.category === filterCat;
-    const matchesText =
-      !searchTerm ||
-      (exp.title || "").toLowerCase().includes(searchTerm) ||
-      (exp.paidBy || "").toLowerCase().includes(searchTerm) ||
-      (exp.notes || "").toLowerCase().includes(searchTerm);
-    return matchesCat && matchesText;
-  });
-
-  const listEl = document.getElementById("expenses-list");
-  listEl.innerHTML = "";
-  if (filteredExpenses.length === 0) {
-    listEl.innerHTML = `<div class="glass-card rounded-2xl p-6 text-center text-xs text-slate-400">No matching expenses found.</div>`;
-  } else {
-    filteredExpenses.forEach((exp) => {
-      const card = document.createElement("div");
-      card.className = "glass-card rounded-2xl p-3.5 flex items-center justify-between gap-3";
-      card.innerHTML = `
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-bold text-white truncate">${escapeHtml(exp.title)}</span>
-            <span class="px-2 py-0.5 rounded-md bg-blue-500/15 text-cyan-300 text-[10px] font-bold shrink-0">${escapeHtml(exp.category)}</span>
-          </div>
-          <p class="text-[11px] text-slate-400 mt-1">
-            Paid by <strong class="text-emerald-300">${escapeHtml(exp.paidBy)}</strong> • Split ${(exp.splitBetween || []).length} ways ${exp.date ? `• ${escapeHtml(exp.date)}` : ""}
-          </p>
-          ${exp.notes ? `<p class="text-[10px] text-slate-500 mt-0.5 truncate">${escapeHtml(exp.notes)}</p>` : ""}
-        </div>
-        <div class="flex items-center gap-2 shrink-0">
-          <span class="text-sm font-extrabold text-white">${cur}${Number(exp.amount).toFixed(0)}</span>
-          <button class="edit-exp-btn p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"><i class="fa-solid fa-pen"></i></button>
-          <button class="del-exp-btn p-1.5 rounded-lg bg-slate-800 hover:bg-red-500/25 text-slate-400 hover:text-red-400 text-xs"><i class="fa-solid fa-trash"></i></button>
-        </div>
-      `;
-      card.querySelector(".edit-exp-btn").onclick = () => openExpenseModal(exp);
-      card.querySelector(".del-exp-btn").onclick = async () => {
-        await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "expenses", exp.id));
-        showToast("Expense deleted", "info");
-      };
-      listEl.appendChild(card);
-    });
-  }
-
-  // Calculate Net Balances & Paid Totals
-  const balances = {};
-  const paidTotals = {};
-  ws.members.forEach((m) => {
-    balances[m] = 0;
-    paidTotals[m] = 0;
-  });
-
-  currentExpenses.forEach((exp) => {
-    const amt = Number(exp.amount) || 0;
-    const payer = exp.paidBy;
-    const splitters = (exp.splitBetween || []).filter((m) => Object.prototype.hasOwnProperty.call(balances, m));
-    if (Object.prototype.hasOwnProperty.call(balances, payer)) {
-      balances[payer] += amt;
-      paidTotals[payer] += amt;
-    }
-    if (splitters.length > 0) {
-      const share = amt / splitters.length;
-      splitters.forEach((s) => (balances[s] -= share));
-    }
-  });
-
-  // Render Member Balances
-  const balEl = document.getElementById("member-balances-list");
-  balEl.innerHTML = "";
-  Object.entries(balances).forEach(([member, net]) => {
-    const isPositive = net >= -0.01;
-    const row = document.createElement("div");
-    row.className = "flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-[#080c17] border border-slate-800 text-xs";
-    row.innerHTML = `
-      <div>
-        <span class="font-bold text-white">${escapeHtml(member)}</span>
-        <span class="text-[10px] text-slate-500 ml-2">Paid ${cur}${(paidTotals[member] || 0).toFixed(0)}</span>
-      </div>
-      <span class="font-extrabold ${isPositive ? "text-emerald-400" : "text-rose-400"}">
-        ${isPositive ? `Gets back ${cur}${Math.abs(net).toFixed(0)}` : `Owes ${cur}${Math.abs(net).toFixed(0)}`}
-      </span>
-    `;
-    balEl.appendChild(row);
-  });
-
-  // Minimum Transfers Settlement Algorithm
-  const debtors = [];
-  const creditors = [];
-  Object.entries(balances).forEach(([person, amt]) => {
-    if (amt < -0.5) debtors.push({ person, amt: Math.abs(amt) });
-    else if (amt > 0.5) creditors.push({ person, amt });
-  });
-
-  const transfers = [];
-  let i = 0;
-  let j = 0;
-  while (i < debtors.length && j < creditors.length) {
-    const payAmt = Math.min(debtors[i].amt, creditors[j].amt);
-    transfers.push({ from: debtors[i].person, to: creditors[j].person, amount: payAmt });
-    debtors[i].amt -= payAmt;
-    creditors[j].amt -= payAmt;
-    if (debtors[i].amt < 0.5) i++;
-    if (creditors[j].amt < 0.5) j++;
-  }
-
-  const settleEl = document.getElementById("settlements-list");
-  settleEl.innerHTML = "";
-  if (transfers.length === 0) {
-    settleEl.innerHTML = `<p class="text-xs text-slate-400">Everyone is settled up! Zero pending dues.</p>`;
-  } else {
-    transfers.forEach((tr) => {
-      const upiId = ws.upiId || userProfile.upiId || "";
-      const upiLink = upiId
-        ? `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(tr.to)}&am=${tr.amount.toFixed(0)}&cu=INR`
-        : null;
-
-      const card = document.createElement("div");
-      card.className = "flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-[#080c17] border border-slate-800 text-xs";
-      card.innerHTML = `
-        <div>
-          <span class="font-bold text-rose-300">${escapeHtml(tr.from)}</span>
-          <i class="fa-solid fa-arrow-right mx-1.5 text-slate-500"></i>
-          <span class="font-bold text-emerald-300">${escapeHtml(tr.to)}</span>
-          <span class="ml-2 font-extrabold text-white">${cur}${tr.amount.toFixed(0)}</span>
-        </div>
-        <div class="flex items-center gap-1.5">
-          ${
-            upiLink
-              ? `<a href="${upiLink}" class="px-2.5 py-1.5 rounded-lg bg-emerald-500 text-slate-950 font-bold text-[11px]">Pay UPI</a>
-                 <button type="button" class="qr-btn px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold text-[11px]"><i class="fa-solid fa-qrcode"></i></button>`
-              : ""
-          }
-          <button type="button" class="settle-btn px-2.5 py-1.5 rounded-lg bg-blue-600/25 hover:bg-blue-600/40 text-cyan-200 border border-blue-500/30 font-bold text-[11px]">Settle</button>
-        </div>
-      `;
-
-      const qrBtn = card.querySelector(".qr-btn");
-      if (qrBtn && upiLink) {
-        qrBtn.onclick = () => {
-          document.getElementById("qr-title").textContent = `${tr.from} → ${tr.to} (${cur}${tr.amount.toFixed(0)})`;
-          document.getElementById("qr-upi-text").textContent = `UPI ID: ${upiId}`;
-          document.getElementById("qr-image").src = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(upiLink)}`;
-          document.getElementById("qr-modal").classList.remove("hidden");
-        };
-      }
-
-      card.querySelector(".settle-btn").onclick = async () => {
-        await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "expenses"), {
-          title: `Settlement: ${tr.from} → ${tr.to}`,
-          amount: Number(tr.amount.toFixed(2)),
-          category: "Settlement",
-          paidBy: tr.from,
-          splitBetween: [tr.to],
-          date: new Date().toISOString().split("T")[0],
-          notes: "Marked as settled",
-          createdAt: serverTimestamp()
-        });
-        showToast("Settlement recorded!", "success");
-      };
-
-      settleEl.appendChild(card);
-    });
-  }
-
-  renderAnalyticsCharts(ws, paidTotals, totalSpent, cur);
-}
-
-document.getElementById("close-qr-modal").onclick = () => {
-  document.getElementById("qr-modal").classList.add("hidden");
-};
-
-// ==================== 7. ANALYTICS CHARTS (CHART.JS) ====================
-function renderAnalyticsCharts(ws, paidTotals, totalSpent, cur) {
-  const catTotals = {};
-  currentExpenses.forEach((e) => {
-    if (e.category === "Settlement") return;
-    catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0);
-  });
-
-  const catLabels = Object.keys(catTotals);
-  const catValues = Object.values(catTotals);
-  const palette = ["#22d3ee", "#3b82f6", "#10b981", "#f59e0b", "#a855f7", "#f43f5e"];
-
-  const catCanvas = document.getElementById("category-chart");
-  if (catCanvas && typeof Chart !== "undefined") {
-    if (categoryChartInstance) categoryChartInstance.destroy();
-    categoryChartInstance = new Chart(catCanvas, {
-      type: "doughnut",
-      data: {
-        labels: catLabels.length ? catLabels : ["No Data"],
-        datasets: [
-          {
-            data: catValues.length ? catValues : [1],
-            backgroundColor: catValues.length ? palette : ["#1e293b"],
-            borderWidth: 0
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { position: "bottom", labels: { color: "#cbd5e1", font: { size: 10 } } } }
-      }
-    });
-  }
-
-  const memCanvas = document.getElementById("member-chart");
-  if (memCanvas && typeof Chart !== "undefined") {
-    if (memberChartInstance) memberChartInstance.destroy();
-    memberChartInstance = new Chart(memCanvas, {
-      type: "bar",
-      data: {
-        labels: ws.members,
-        datasets: [
-          {
-            label: `Paid (${cur})`,
-            data: ws.members.map((m) => paidTotals[m] || 0),
-            backgroundColor: "#22d3ee",
-            borderRadius: 8
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { display: false } },
-          y: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { color: "#1e293b" } }
-        }
-      }
-    });
-  }
-
-  // Category Breakdown List
-  const bdList = document.getElementById("category-breakdown-list");
-  bdList.innerHTML = "";
-  if (catLabels.length === 0) {
-    bdList.innerHTML = `<p class="text-xs text-slate-400">Add expenses to view category breakdown.</p>`;
-  } else {
-    catLabels.forEach((cat, idx) => {
-      const val = catTotals[cat];
-      const share = totalSpent > 0 ? Math.round((val / totalSpent) * 100) : 0;
-      const row = document.createElement("div");
-      row.className = "flex items-center justify-between text-xs px-3 py-2 rounded-xl bg-[#080c17] border border-slate-800";
-      row.innerHTML = `
-        <span class="font-semibold text-white flex items-center gap-2">
-          <span class="w-2.5 h-2.5 rounded-full" style="background:${palette[idx % palette.length]}"></span>
-          ${escapeHtml(cat)}
-        </span>
-        <span class="font-bold text-slate-300">${cur}${val.toFixed(0)} <span class="text-slate-500">(${share}%)</span></span>
-      `;
-      bdList.appendChild(row);
-    });
-  }
-}
-
-// ==================== 8. GEMINI AI ENGINE (VISION RECEIPT + NLP + AUDIT) ====================
+// ==================== 7. GEMINI AI SMART ENTRY, RECEIPT VISION & AUDIT ====================
 async function callGeminiAI(parts) {
   const apiKey = getActiveGeminiKey();
   const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
@@ -902,7 +955,7 @@ async function callGeminiAI(parts) {
       lastError = e.message;
     }
   }
-  return { text: null, error: lastError || "AI service unavailable" };
+  return { text: null, error: lastError || "AI connection failed" };
 }
 
 function extractJsonObject(rawText) {
@@ -916,166 +969,643 @@ function extractJsonObject(rawText) {
   }
 }
 
-// 1. Natural Language Smart Entry
-document.getElementById("ai-parse-btn").onclick = async () => {
+async function applyParsedAiExpense(parsed) {
   const ws = getActiveWorkspace();
-  const input = document.getElementById("ai-smart-input");
-  const statusEl = document.getElementById("ai-status-line");
-  const rawText = input.value.trim();
-  if (!ws || !rawText) return;
+  if (!ws || !parsed || !(Number(parsed.amount) > 0)) return false;
 
-  statusEl.textContent = "Gemini AI is parsing your expense...";
-  statusEl.classList.remove("hidden");
+  const isoDate = document.getElementById("entryDate").value || getLocalTodayISO();
+  const dateFormatted = formatDateWithDay(isoDate);
+  const existing = rawData.find((r) => r.date === dateFormatted);
 
-  const prompt = `Extract expense details from this text: "${rawText}".
-Members list: ${JSON.stringify(ws.members)}.
-Categories list: ${JSON.stringify(ws.categories)}.
-Return ONLY a JSON object with keys: "title" (string), "amount" (number), "paidBy" (string matching members list or "${ws.members[0]}"), "category" (string matching categories list).`;
+  const slots = ws.slots || [];
+  const matchedSlot = slots.find((s) => s.toLowerCase() === String(parsed.slot || "").toLowerCase()) || slots[0];
+  const itemString = `${Number(parsed.amount)} (${parsed.item || "AI Entry"})`;
+  const paidBy = (ws.members || []).find((m) => m.toLowerCase() === String(parsed.paidBy || "").toLowerCase()) || ws.members[0];
 
-  const { text, error } = await callGeminiAI([{ text: prompt }]);
-  const parsed = extractJsonObject(text);
+  const slotValues = existing ? { ...(existing.slotValues || {}) } : {};
+  const prevVal = slotValues[matchedSlot] || "";
+  slotValues[matchedSlot] = prevVal ? `${prevVal}, ${itemString}` : itemString;
 
-  if (parsed && Number(parsed.amount) > 0) {
-    await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "expenses"), {
-      title: parsed.title || rawText,
-      amount: Number(parsed.amount),
-      paidBy: ws.members.includes(parsed.paidBy) ? parsed.paidBy : ws.members[0],
-      category: ws.categories.includes(parsed.category) ? parsed.category : ws.categories[0],
-      splitBetween: ws.members,
-      date: new Date().toISOString().split("T")[0],
-      notes: "Added via Gemini AI",
-      createdAt: serverTimestamp()
-    });
-    input.value = "";
-    statusEl.textContent = `Added: ${parsed.title} (${getCurrency()}${parsed.amount}) paid by ${parsed.paidBy}`;
-    setTimeout(() => statusEl.classList.add("hidden"), 3500);
+  let slotSum = 0;
+  slots.forEach((s) => (slotSum += extractAmount(slotValues[s])));
+  const otherText = existing?.other || "";
+  const total = slotSum + extractAmount(otherText);
+
+  const payload = {
+    date: dateFormatted,
+    paidBy,
+    slotValues,
+    other: otherText,
+    total,
+    updatedAt: serverTimestamp()
+  };
+
+  if (existing) {
+    await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", existing.docId), payload);
   } else {
-    statusEl.textContent = error ? `AI Error: ${error}` : 'Try format: "Sam paid 350 for lunch"';
+    payload.createdAt = serverTimestamp();
+    await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"), payload);
+  }
+  return true;
+}
+
+document.getElementById("aiSmartAddBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const input = document.getElementById("aiSmartText");
+  const banner = document.getElementById("aiStatusBanner");
+  const text = input.value.trim();
+  if (!ws || !text) return;
+
+  banner.innerText = "✨ Gemini AI is understanding your entry...";
+  banner.classList.remove("hidden");
+
+  const prompt = `Extract expense from: "${text}".
+Available slots: ${JSON.stringify(ws.slots)}.
+Available members: ${JSON.stringify(ws.members)}.
+Return ONLY a valid JSON object: {"item": string, "amount": number, "slot": string, "paidBy": string}.`;
+
+  const { text: aiReply, error } = await callGeminiAI([{ text: prompt }]);
+  const parsed = extractJsonObject(aiReply);
+
+  if (parsed && (await applyParsedAiExpense(parsed))) {
+    input.value = "";
+    banner.innerText = `✅ Added ${getCurrency()}${parsed.amount} (${parsed.item}) under ${parsed.slot}`;
+    setTimeout(() => banner.classList.add("hidden"), 3500);
+  } else {
+    banner.innerText = error ? `⚠️ ${error}` : 'Try format: "Paid 120 for lunch"';
   }
 };
 
-// 2. Gemini Vision Receipt Scanner (with auto image compression)
-document.getElementById("ai-receipt-input").onchange = async (e) => {
+document.getElementById("aiReceiptFile").onchange = async (e) => {
   const file = e.target.files[0];
   const ws = getActiveWorkspace();
   if (!file || !ws) return;
 
-  const statusEl = document.getElementById("ai-status-line");
-  statusEl.textContent = "Compressing & scanning receipt with Gemini Vision...";
-  statusEl.classList.remove("hidden");
+  const banner = document.getElementById("aiStatusBanner");
+  banner.innerText = "📷 Compressing & scanning receipt with Gemini Vision...";
+  banner.classList.remove("hidden");
 
   try {
-    const compressed = await compressImageFile(file, 960, 0.82);
-    const prompt = `Analyze this receipt or bill image. Find the shop/merchant name or main item as "title", the final grand total amount as a pure number "amount", and pick the best category from ${JSON.stringify(ws.categories)} as "category".
-Return ONLY a JSON object like {"title": "Supermarket Bill", "amount": 450, "category": "Food & Groceries"}.`;
+    const compressed = await compressImage(file, 960, 0.82);
+    const prompt = `Read this receipt/bill image. Extract the main shop/item name as "item", the final total amount as a pure number "amount", and pick the closest slot from ${JSON.stringify(ws.slots)} as "slot".
+Return ONLY a valid JSON object: {"item": string, "amount": number, "slot": string}.`;
 
-    const { text, error } = await callGeminiAI([
+    const { text: aiReply, error } = await callGeminiAI([
       { text: prompt },
       { inline_data: { mime_type: compressed.mime, data: compressed.base64 } }
     ]);
 
-    const parsed = extractJsonObject(text);
-    if (parsed && Number(parsed.amount) > 0) {
-      await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "expenses"), {
-        title: parsed.title || "Scanned Receipt",
-        amount: Number(parsed.amount),
-        paidBy: ws.members[0],
-        category: ws.categories.includes(parsed.category) ? parsed.category : ws.categories[0],
-        splitBetween: ws.members,
-        date: new Date().toISOString().split("T")[0],
-        notes: "Scanned with Gemini Vision",
-        createdAt: serverTimestamp()
-      });
-      statusEl.textContent = `Receipt Scanned: ${parsed.title} — ${getCurrency()}${parsed.amount}`;
-      setTimeout(() => statusEl.classList.add("hidden"), 4000);
+    const parsed = extractJsonObject(aiReply);
+    if (parsed && (await applyParsedAiExpense(parsed))) {
+      banner.innerText = `✅ Receipt Scanned: ${getCurrency()}${parsed.amount} (${parsed.item})`;
+      setTimeout(() => banner.classList.add("hidden"), 4000);
     } else {
-      statusEl.textContent = error ? `AI Vision Error: ${error}` : "Could not detect total on receipt. Try a clearer photo.";
+      banner.innerText = error ? `⚠️ ${error}` : "Could not read bill total. Try a clearer photo.";
     }
   } catch (err) {
-    statusEl.textContent = "Failed to process image.";
+    banner.innerText = "⚠️ Image processing failed.";
   }
   e.target.value = "";
 };
 
-// 3. AI Spending Audit
-document.getElementById("ai-audit-btn").onclick = async () => {
+document.getElementById("aiAuditTriggerBtn").onclick = async () => {
   const ws = getActiveWorkspace();
-  const statusEl = document.getElementById("ai-status-line");
-  if (!ws || currentExpenses.length === 0) {
-    statusEl.textContent = "Add a few expenses first to run an AI Audit.";
-    statusEl.classList.remove("hidden");
+  const banner = document.getElementById("aiStatusBanner");
+  if (!ws || currentActiveRows.length === 0) {
+    banner.innerText = "Add some entries in the active week first to run AI Audit.";
+    banner.classList.remove("hidden");
     return;
   }
 
-  statusEl.textContent = "Gemini AI is auditing your group expenses...";
-  statusEl.classList.remove("hidden");
+  banner.innerText = "🧠 Gemini AI is auditing your spending pattern...";
+  banner.classList.remove("hidden");
 
-  const summary = currentExpenses
-    .slice(0, 25)
-    .map((e) => `${e.title}: ${getCurrency()}${e.amount} (${e.category}, paid by ${e.paidBy})`)
+  const summary = currentActiveRows
+    .map((r) => `${r.date}: Total ${getCurrency()}${r.total} (Paid by ${r.paidBy})`)
     .join("; ");
 
-  const { text, error } = await callGeminiAI([
+  const { text: advice, error } = await callGeminiAI([
     {
-      text: `Audit these shared expenses for "${ws.name}": ${summary}. Give 2 short, smart financial insights and saving tips in simple English (max 45 words).`
+      text: `Analyze these expenses for "${ws.name}": ${summary}. Give 2 short, practical money-saving insights in simple English (max 45 words).`
     }
   ]);
 
-  statusEl.textContent = text || `AI Audit unavailable: ${error}`;
+  banner.innerText = advice ? `💡 ${advice}` : `⚠️ ${error}`;
 };
 
-// ==================== 9. PDF REPORT, WHATSAPP SHARE & TABS ====================
-document.getElementById("export-pdf-btn").onclick = () => {
+// ==================== 8. LEDGER TABLE, EDIT MODAL, SMART SPLIT & CHARTS ====================
+window.openEdit = (docId) => {
   const ws = getActiveWorkspace();
-  if (!ws) return;
-  const { jsPDF } = window.jspdf;
-  const docPdf = new jsPDF();
+  const item = rawData.find((r) => r.docId === docId);
+  if (!ws || !item) return;
 
-  docPdf.setFontSize(16);
-  docPdf.text(`Hisab-Cloud Report: ${ws.name}`, 14, 18);
-  docPdf.setFontSize(10);
-  docPdf.text(`Account: ${userProfile.fullName} (@${userProfile.username}) • Date: ${new Date().toLocaleDateString()}`, 14, 25);
+  document.getElementById("editDocId").value = item.docId;
+  document.getElementById("editDate").value = item.date;
 
-  const rows = currentExpenses.map((e) => [
-    e.date || "-",
-    e.title,
-    e.category,
-    e.paidBy,
-    `${e.amount}`
-  ]);
+  const paidSel = document.getElementById("editPaidBy");
+  paidSel.innerHTML = (ws.members || []).map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  if (item.paidBy) paidSel.value = item.paidBy;
 
-  docPdf.autoTable({
-    startY: 32,
-    head: [["Date", "Description", "Category", "Paid By", "Amount"]],
-    body: rows
+  const grid = document.getElementById("editDynamicSlotsGrid");
+  grid.innerHTML = "";
+  (ws.slots || []).forEach((slotName, idx) => {
+    const val = item.slotValues?.[slotName] || "";
+    const field = document.createElement("div");
+    field.className = "field";
+    field.innerHTML = `
+      <label>${escapeHtml(slotName)}</label>
+      <input type="text" class="smart-input edit-slot-inp" data-slot="${escapeHtml(slotName)}" value="${escapeHtml(val === "-" ? "" : val)}" />
+    `;
+    grid.appendChild(field);
+    attachSmartListener(field.querySelector("input"));
   });
 
-  docPdf.save(`${ws.name.replace(/\s+/g, "_")}_HisabCloud_Report.pdf`);
-  showToast("PDF Report downloaded!", "success");
+  const editCont = document.getElementById("editOthersContainer");
+  editCont.innerHTML = "";
+  if (item.other && item.other !== "-") {
+    item.other.split(",").forEach((p) => window.addOtherInput("editOthersContainer", p.trim()));
+  } else {
+    window.addOtherInput("editOthersContainer");
+  }
+
+  document.getElementById("editModal").classList.add("show");
 };
 
-document.getElementById("share-whatsapp-btn").onclick = () => {
+window.closeModal = () => {
+  document.getElementById("editModal").classList.remove("show");
+};
+
+window.saveEdit = async () => {
+  const ws = getActiveWorkspace();
+  const btn = document.getElementById("updateModalBtn");
+  const docId = document.getElementById("editDocId").value;
+  if (!ws || !docId) return;
+
+  btn.innerText = "Updating...";
+  btn.disabled = true;
+
+  const paidBy = document.getElementById("editPaidBy").value;
+  const slotValues = {};
+  let slotSum = 0;
+
+  document.querySelectorAll(".edit-slot-inp").forEach((inp) => {
+    const sName = inp.dataset.slot;
+    const cleaned = cleanItemText(inp.value);
+    slotValues[sName] = cleaned;
+    slotSum += extractAmount(cleaned);
+  });
+
+  const otherData = getDynamicOthers("editOthersContainer");
+  const total = slotSum + otherData.total;
+
+  try {
+    await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", docId), {
+      paidBy,
+      slotValues,
+      other: otherData.text,
+      total,
+      updatedAt: serverTimestamp()
+    });
+    window.closeModal();
+    showToast("Record updated!");
+  } catch (err) {
+    showToast("Update failed: " + err.message, "error");
+  } finally {
+    btn.innerText = "Update";
+    btn.disabled = false;
+  }
+};
+
+window.deleteSingleRow = async (docId) => {
+  const ws = getActiveWorkspace();
+  if (!ws || !confirm("Delete this expense record permanently?")) return;
+  await deleteDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", docId));
+  showToast("Record deleted");
+};
+
+window.deleteCurrentWeek = async (docIds) => {
+  const ws = getActiveWorkspace();
+  if (!ws || !confirm("Delete all records for this active week?")) return;
+  const batch = writeBatch(db);
+  docIds.forEach((id) => batch.delete(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", id)));
+  await batch.commit();
+  showToast("Week records deleted");
+};
+
+window.clearFilters = () => {
+  document.getElementById("searchDate").value = "";
+  document.getElementById("searchText").value = "";
+  renderTable();
+};
+
+function getCalendarWeekRange(offset) {
+  const now = new Date();
+  const day = now.getDay();
+  const diffToMon = now.getDate() - day + (day === 0 ? -6 : 1) + offset * 7;
+  const start = new Date(now.getFullYear(), now.getMonth(), diffToMon);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function formatDateShort(d) {
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+
+window.prevWeek = () => { weekOffset--; renderTable(); };
+window.nextWeek = () => { weekOffset++; renderTable(); };
+window.resetToCurrentWeek = () => { weekOffset = 0; window.clearFilters(); };
+
+function renderTable() {
   const ws = getActiveWorkspace();
   if (!ws) return;
   const cur = getCurrency();
-  const total = currentExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const text = `*Hisab-Cloud — ${ws.name}*\nTotal Spent: ${cur}${total.toFixed(0)}\nMembers: ${ws.members.join(", ")}\nManage live: ${window.location.href}`;
-  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  const slots = ws.slots || [];
+
+  const thead = document.getElementById("ledgerTableHead");
+  thead.innerHTML = `<tr>
+    <th>Date & Day</th>
+    <th>Paid By</th>
+    ${slots.map((s) => `<th>${escapeHtml(s)}</th>`).join("")}
+    <th>Other</th>
+    <th>Total</th>
+    <th>Actions</th>
+  </tr>`;
+
+  const tbody = document.getElementById("tableBody");
+  const centerBtn = document.getElementById("centerWeekBtn");
+  const weekDelCont = document.getElementById("weekDeleteContainer");
+  const sDate = document.getElementById("searchDate").value;
+  const sText = document.getElementById("searchText").value.toLowerCase().trim();
+
+  tbody.innerHTML = "";
+  const isSearchActive = sDate || sText;
+  let displayRows = [];
+
+  if (isSearchActive) {
+    let filtered = [...rawData];
+    if (sDate) {
+      const parts = sDate.split("-");
+      const targetDate = `${parts[2]}/${parts[1]}/${parts[0]}`;
+      filtered = filtered.filter((r) => r.date.startsWith(targetDate));
+    }
+    if (sText) {
+      filtered = filtered.filter((r) => {
+        const slotBlob = Object.values(r.slotValues || {}).join(" ").toLowerCase();
+        return (
+          r.date.toLowerCase().includes(sText) ||
+          (r.paidBy || "").toLowerCase().includes(sText) ||
+          slotBlob.includes(sText) ||
+          (r.other || "").toLowerCase().includes(sText)
+        );
+      });
+    }
+    centerBtn.innerHTML = `<span style="font-size:12px; color:var(--primary); font-weight:700;">Results (${filtered.length})</span>`;
+    displayRows = filtered;
+  } else {
+    const range = getCalendarWeekRange(weekOffset);
+    const rangeText = `${formatDateShort(range.start)} - ${formatDateShort(range.end)}`;
+    if (weekOffset === 0) {
+      centerBtn.innerHTML = `<strong style="font-size:12px; color:var(--primary);">Current Week</strong><br><small style="color:var(--muted); font-size:10px;">${rangeText}</small>`;
+    } else {
+      centerBtn.innerHTML = `<button class="back-pill" onclick="resetToCurrentWeek()">Current Week (${rangeText})</button>`;
+    }
+
+    displayRows = rawData.filter((r) => {
+      const d = parseEntryDate(r.date);
+      return d >= range.start && d <= range.end;
+    });
+  }
+
+  displayRows.sort((a, b) => parseEntryDate(a.date) - parseEntryDate(b.date));
+  currentActiveRows = displayRows;
+
+  // Month Total & Budget Bar
+  const now = new Date();
+  const monthTotal = rawData.reduce((acc, r) => {
+    const d = parseEntryDate(r.date);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear() ? acc + (Number(r.total) || 0) : acc;
+  }, 0);
+  document.getElementById("statMonth").innerText = `${cur}${monthTotal}`;
+  updateBudgetUI(monthTotal, ws);
+
+  const colSpan = slots.length + 5;
+  if (displayRows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center; padding:18px; color:var(--muted);">No expense records found for this period.</td></tr>`;
+    updateStats(0, 0, ws);
+    renderSmartSplit(ws, []);
+    weekDelCont.innerHTML = "";
+    return;
+  }
+
+  let viewTotal = 0;
+  const currentDocIds = [];
+
+  displayRows.forEach((r) => {
+    currentDocIds.push(r.docId);
+    viewTotal += Number(r.total) || 0;
+
+    const slotCells = slots
+      .map((s) => `<td>${escapeHtml(r.slotValues?.[s] || "-")}</td>`)
+      .join("");
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="date-tag">${escapeHtml(r.date)}</span></td>
+      <td style="color:var(--cyan); font-weight:600;">${escapeHtml(r.paidBy || ws.members[0])}</td>
+      ${slotCells}
+      <td>${escapeHtml(r.other || "-")}</td>
+      <td><span class="amt-tag">${cur}${r.total}</span></td>
+      <td>
+        <button class="act-btn" style="background:rgba(6,182,212,0.18); color:#67e8f9;" onclick="openEdit('${r.docId}')">✏️</button>
+        <button class="act-btn" style="background:rgba(244,63,94,0.16); color:var(--rose);" onclick="deleteSingleRow('${r.docId}')">🗑️</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  if (displayRows.length > 0 && !isSearchActive) {
+    weekDelCont.innerHTML = `<button class="btn-del-wk" onclick='deleteCurrentWeek(${JSON.stringify(currentDocIds)})'>🗑️ Delete Week</button>`;
+  } else {
+    weekDelCont.innerHTML = "";
+  }
+
+  updateStats(viewTotal, displayRows.length, ws);
+  renderSmartSplit(ws, displayRows);
+  if (document.getElementById("tab-analytics").classList.contains("active")) renderCharts();
+}
+window.renderTable = renderTable;
+
+function updateStats(total, count, ws) {
+  const cur = getCurrency();
+  const memCount = (ws.members || []).length || 1;
+  document.getElementById("statTotal").innerText = `${cur}${total}`;
+  document.getElementById("statAvg").innerText = count > 0 ? `${cur}${Math.round(total / count)}` : `${cur}0`;
+  document.getElementById("statEntries").innerText = `${count} Days`;
+  document.getElementById("statPerMember").innerText = `${cur}${Math.round(total / memCount)}`;
+}
+
+// Smart Split & UPI QR Engine
+function renderSmartSplit(ws, rows) {
+  const cur = getCurrency();
+  const members = ws.members || [];
+  const balWrap = document.getElementById("memberBalancesWrap");
+  const transWrap = document.getElementById("settlementTransfersWrap");
+
+  const paidByMember = {};
+  members.forEach((m) => (paidByMember[m] = 0));
+
+  let totalWeek = 0;
+  rows.forEach((r) => {
+    const amt = Number(r.total) || 0;
+    totalWeek += amt;
+    const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
+    if (payer) paidByMember[payer] += amt;
+  });
+
+  const fairShare = members.length > 0 ? totalWeek / members.length : 0;
+  const netBalances = {};
+
+  balWrap.innerHTML = "";
+  members.forEach((m) => {
+    const net = paidByMember[m] - fairShare;
+    netBalances[m] = net;
+    const row = document.createElement("div");
+    row.className = "split-row";
+    row.innerHTML = `
+      <div>
+        <strong>${escapeHtml(m)}</strong>
+        <span style="display:block; font-size:10px; color:var(--muted);">Paid ${cur}${paidByMember[m].toFixed(0)}</span>
+      </div>
+      <span style="font-weight:800; color:${net >= -0.5 ? "var(--primary)" : "var(--rose)"};">
+        ${net >= -0.5 ? `Gets ${cur}${Math.abs(net).toFixed(0)}` : `Owes ${cur}${Math.abs(net).toFixed(0)}`}
+      </span>
+    `;
+    balWrap.appendChild(row);
+  });
+
+  // Minimum Transfers
+  const debtors = [];
+  const creditors = [];
+  Object.entries(netBalances).forEach(([person, amt]) => {
+    if (amt < -0.5) debtors.push({ person, amt: Math.abs(amt) });
+    else if (amt > 0.5) creditors.push({ person, amt });
+  });
+
+  const transfers = [];
+  let i = 0;
+  let j = 0;
+  while (i < debtors.length && j < creditors.length) {
+    const payAmt = Math.min(debtors[i].amt, creditors[j].amt);
+    transfers.push({ from: debtors[i].person, to: creditors[j].person, amount: payAmt });
+    debtors[i].amt -= payAmt;
+    creditors[j].amt -= payAmt;
+    if (debtors[i].amt < 0.5) i++;
+    if (creditors[j].amt < 0.5) j++;
+  }
+
+  transWrap.innerHTML = "";
+  if (transfers.length === 0) {
+    transWrap.innerHTML = `<p style="font-size:12px; color:var(--muted);">All settled up! No pending transfers.</p>`;
+  } else {
+    const upiId = ws.upiId || userProfile.upiId || "";
+    transfers.forEach((tr) => {
+      const upiUrl = upiId
+        ? `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(tr.to)}&am=${tr.amount.toFixed(0)}&cu=INR`
+        : "";
+
+      const row = document.createElement("div");
+      row.className = "split-row";
+      row.innerHTML = `
+        <div>
+          <strong style="color:var(--rose);">${escapeHtml(tr.from)}</strong> →
+          <strong style="color:var(--primary);">${escapeHtml(tr.to)}</strong>
+          <span style="margin-left:6px; font-weight:800;">${cur}${tr.amount.toFixed(0)}</span>
+        </div>
+        ${
+          upiUrl
+            ? `<div style="display:flex; gap:6px;">
+                 <a href="${upiUrl}" class="btn-primary" style="padding:6px 10px; font-size:11px; text-decoration:none;">Pay UPI</a>
+                 <button type="button" class="btn-ghost qr-open-btn" style="padding:6px 9px; font-size:11px;">QR</button>
+               </div>`
+            : `<span style="font-size:10px; color:var(--muted);">Add UPI ID below</span>`
+        }
+      `;
+      const qrBtn = row.querySelector(".qr-open-btn");
+      if (qrBtn) {
+        qrBtn.onclick = () => {
+          document.getElementById("qrModalTitle").innerText = `${tr.from} → ${tr.to} (${cur}${tr.amount.toFixed(0)})`;
+          document.getElementById("qrModalUpiLabel").innerText = `UPI: ${upiId}`;
+          document.getElementById("qrModalImg").src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiUrl)}`;
+          document.getElementById("qrModal").classList.add("show");
+        };
+      }
+      transWrap.appendChild(row);
+    });
+  }
+}
+
+window.setMonthlyBudget = async () => {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  const val = prompt(`Enter Monthly Budget Limit (${getCurrency()}):`, ws.budgetLimit || 5000);
+  if (val && !isNaN(val) && Number(val) > 0) {
+    await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id), { budgetLimit: Number(val) });
+    showToast(`Monthly budget set to ${getCurrency()}${val}`);
+  }
 };
 
-document.querySelectorAll(".nav-tab").forEach((tab) => {
-  tab.onclick = () => {
-    const target = tab.dataset.tab;
-    document.querySelectorAll(".nav-tab").forEach((t) => {
-      t.className = "nav-tab py-2 rounded-xl text-slate-400 hover:text-white transition";
-    });
-    tab.className = "nav-tab py-2 rounded-xl bg-blue-600 text-white transition";
+function updateBudgetUI(monthSpent, ws) {
+  const cur = getCurrency();
+  const limit = Number(ws.budgetLimit) || 5000;
+  const pct = Math.min((monthSpent / limit) * 100, 100);
+  const rem = Math.max(limit - monthSpent, 0);
 
-    document.querySelectorAll(".tab-panel").forEach((panel) => {
-      panel.classList.toggle("hidden", panel.id !== `tab-${target}`);
+  const now = new Date();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const daysLeft = Math.max(daysInMonth - now.getDate() + 1, 1);
+  const safeDaily = Math.round(rem / daysLeft);
+
+  const bar = document.getElementById("budgetBarFill");
+  bar.style.width = `${pct}%`;
+  bar.style.background = pct > 90 ? "var(--rose)" : "linear-gradient(90deg, #06b6d4, #10b981)";
+
+  document.getElementById("budgetSpentLbl").innerText = `Spent: ${cur}${monthSpent}`;
+  document.getElementById("budgetLimitLbl").innerText = `Limit: ${cur}${limit}`;
+  document.getElementById("budgetRemLbl").innerText = `Remaining: ${cur}${rem}`;
+  document.getElementById("safeDailyLbl").innerText = `Safe Daily: ${cur}${safeDaily}/day`;
+}
+
+function renderCharts() {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  const slots = ws.slots || [];
+  const slotTotals = slots.map(() => 0);
+  let otherSum = 0;
+
+  const labels = [];
+  const totals = [];
+
+  currentActiveRows.forEach((r) => {
+    slots.forEach((s, idx) => {
+      slotTotals[idx] += extractAmount(r.slotValues?.[s]);
     });
-  };
-});
+    otherSum += extractAmount(r.other);
+    labels.push(r.date.split(" ")[0].slice(0, 5));
+    totals.push(Number(r.total) || 0);
+  });
+
+  if (catChartInstance) catChartInstance.destroy();
+  catChartInstance = new Chart(document.getElementById("catChart"), {
+    type: "doughnut",
+    data: {
+      labels: [...slots, "Other"],
+      datasets: [
+        {
+          data: [...slotTotals, otherSum],
+          backgroundColor: ["#06b6d4", "#10b981", "#f59e0b", "#818cf8", "#a855f7", "#ec4899", "#f43f5e"],
+          borderWidth: 0
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { position: "right", labels: { color: "#f1f5f9", font: { size: 11 } } } }
+    }
+  });
+
+  if (trendChartInstance) trendChartInstance.destroy();
+  trendChartInstance = new Chart(document.getElementById("trendChart"), {
+    type: "bar",
+    data: {
+      labels: labels.length ? labels : ["No Data"],
+      datasets: [
+        {
+          label: `Daily Spend (${getCurrency()})`,
+          data: totals.length ? totals : [0],
+          backgroundColor: "#10b981",
+          borderRadius: 6
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: "#8ca0b3", font: { size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: "#8ca0b3", font: { size: 10 } }, grid: { color: "rgba(255,255,255,0.05)" } }
+      },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+// ==================== 9. WHATSAPP SHARE & PDF REPORT ====================
+window.shareWeeklyReport = () => {
+  const ws = getActiveWorkspace();
+  if (!ws || currentActiveRows.length === 0) return showToast("No records in active week to share", "error");
+  const cur = getCurrency();
+  let total = 0;
+  const lines = [`*💼 HisabCloud Pro — ${ws.name}*`, ""];
+  currentActiveRows.forEach((r) => {
+    total += Number(r.total) || 0;
+    lines.push(`• ${r.date} (${r.paidBy || ws.members[0]}): *${cur}${r.total}*`);
+  });
+  lines.push("", `*Total Spend: ${cur}${total}*`);
+  const text = lines.join("\n");
+
+  if (navigator.clipboard) navigator.clipboard.writeText(text);
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  showToast("Summary copied & opening WhatsApp...");
+};
+
+window.exportPDF = async () => {
+  const ws = getActiveWorkspace();
+  if (!ws || currentActiveRows.length === 0) return showToast("No records available to export", "error");
+
+  showToast("Generating PDF report...");
+  const { jsPDF } = window.jspdf;
+  const docPdf = new jsPDF();
+  const slots = ws.slots || [];
+
+  docPdf.setFontSize(16);
+  docPdf.setTextColor(16, 185, 129);
+  docPdf.text(`HISABCLOUD PRO — ${ws.name.toUpperCase()}`, 14, 18);
+
+  docPdf.setFontSize(10);
+  docPdf.setTextColor(100);
+  docPdf.text(`Account: ${userProfile.fullName} | Generated: ${new Date().toLocaleDateString("en-IN")}`, 14, 25);
+
+  let grandTotal = 0;
+  const tableRows = currentActiveRows.map((r) => {
+    grandTotal += Number(r.total) || 0;
+    return [
+      r.date,
+      r.paidBy || ws.members[0],
+      ...slots.map((s) => r.slotValues?.[s] || "-"),
+      r.other || "-",
+      `${r.total}`
+    ];
+  });
+
+  const footerRow = new Array(slots.length + 2).fill("");
+  footerRow.push("TOTAL SPEND", `${grandTotal}`);
+  tableRows.push(footerRow);
+
+  docPdf.autoTable({
+    startY: 32,
+    head: [["Date & Day", "Paid By", ...slots, "Other", "Total"]],
+    body: tableRows,
+    theme: "grid",
+    headStyles: { fillColor: [16, 185, 129], textColor: [5, 10, 14], fontStyle: "bold" },
+    styles: { fontSize: 8, cellPadding: 3 }
+  });
+
+  docPdf.save(`${ws.name.replace(/\s+/g, "_")}_${getLocalTodayISO()}.pdf`);
+};
 
 function escapeHtml(str) {
   return String(str || "").replace(/[&<>"']/g, (m) => ({
