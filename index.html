@@ -37,7 +37,7 @@
     .container { max-width: 820px; margin: 0 auto; }
     .hidden { display: none !important; }
 
-    /* ================= SPLASH LOADER (PREVENTS LOGIN FLASH) ================= */
+    /* ================= SPLASH LOADER ================= */
     #bootSplash {
       position: fixed; inset: 0; z-index: 9500;
       background: var(--bg);
@@ -410,11 +410,26 @@
 </head>
 <body>
 
-<!-- ==================== 0. INITIAL SESSION SPLASH (NO LOGIN FLASH) ==================== -->
+<!-- ==================== 0. INITIAL SESSION SPLASH (WITH AUTO-RELEASE FAILSAFE) ==================== -->
 <div id="bootSplash">
   <div class="spinner-ring"></div>
   <span style="font-size:12px; color:var(--muted); font-weight:600;">Syncing HisabCloud Session...</span>
 </div>
+<script>
+  // Failsafe: Never allow splash screen to freeze longer than 3.5 seconds
+  setTimeout(function () {
+    var splash = document.getElementById("bootSplash");
+    if (splash && !splash.classList.contains("hidden")) {
+      splash.classList.add("hidden");
+      var mainApp = document.getElementById("mainAppContainer");
+      var onboard = document.getElementById("onboardingScreen");
+      if (mainApp && mainApp.classList.contains("hidden") && onboard && onboard.classList.contains("hidden")) {
+        var authScr = document.getElementById("authScreen");
+        if (authScr) authScr.classList.remove("hidden");
+      }
+    }
+  }, 3500);
+</script>
 
 <!-- ==================== 1. AUTHENTICATION SCREEN ==================== -->
 <div id="authScreen" class="full-overlay hidden">
@@ -611,7 +626,7 @@
       </div>
     </div>
 
-    <!-- Ultra-Smart Gemini AI Hub (Multi-Item Receipt Scanner + Auto-Slot Classifier + Ask AI) -->
+    <!-- Ultra-Smart Gemini AI Hub -->
     <div class="ai-box">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
         <span style="font-size:11px; font-weight:700; color:var(--cyan);">✨ Ultra-Smart Gemini AI (Auto-Filter, Bill Scan & Q&A)</span>
@@ -1033,6 +1048,6 @@
 
 <div id="toast"></div>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>
