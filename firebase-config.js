@@ -1,4 +1,4 @@
-// firebase-config.js — HisabCloud Pro Firebase & Auto-Fallback Gemini 3.8 Engine
+// firebase-config.js — HisabCloud Pro Firebase & Gemini AI Engine
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -32,14 +32,14 @@ export function getActiveGeminiKey() {
   return (GEMINI_PART_1 + GEMINI_PART_2 + GEMINI_PART_3 + GEMINI_PART_4).trim();
 }
 
-// Universal Gemini 3.8 AI Caller with Auto-Fallback & 12s Timeout
+// Universal Gemini AI Caller with Auto-Fallback & Timeout
 export async function runGeminiAI({ contents, parts, jsonMode = false }) {
   const apiKey = getActiveGeminiKey();
   const models = [
-    "gemini-3.8-flash",
-    "gemini-3.8-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite"
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest"
   ];
   const payloadContents = contents || [{ role: "user", parts }];
   const bodyObj = { contents: payloadContents };
@@ -75,7 +75,7 @@ export async function runGeminiAI({ contents, parts, jsonMode = false }) {
       if (data.error?.message) lastError = data.error.message;
     } catch (err) {
       clearTimeout(timer);
-      lastError = err.name === "AbortError" ? "Server timeout, switching model..." : err.message;
+      lastError = err.name === "AbortError" ? "Timeout, trying backup..." : err.message;
     }
   }
   return { text: null, error: lastError || "AI connection failed" };

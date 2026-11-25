@@ -1,5 +1,5 @@
 // app.js — HisabCloud Pro Engine (Gemini 3.8 Everywhere, Persistent AI Chat History, Accurate Multi-Member Split, Verified Auth & Auto-Calc Lock)
-import { auth, db, runGeminiAI } from "./firebase-config.js";
+import { auth, db, runGeminiAI } from "./firebase-config.js?v=8";
 import {
   GoogleAuthProvider,
   EmailAuthProvider,
