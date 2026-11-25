@@ -1,5 +1,5 @@
-// app.js — HisabCloud Pro Engine (Side Gemini Data Chat, Verified Auth, Auto-Calculator Lock, 10x '=' PIN Reset, Receipt Filter, CSV/PDF)
-import { auth, db, getActiveGeminiKey } from "./firebase-config.js";
+// app.js — HisabCloud Pro Engine (Gemini 3.8 Everywhere, Persistent AI Chat History, Accurate Multi-Member Split, Verified Auth & Auto-Calc Lock)
+import { auth, db, runGeminiAI } from "./firebase-config.js";
 import {
   GoogleAuthProvider,
   EmailAuthProvider,
@@ -29,7 +29,7 @@ import {
   writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-// ==================== TEMPLATES ====================
+// ==================== TEMPLATES & OPTIONS ====================
 const WORKSPACE_TEMPLATES = {
   mess: {
     slots: ["Morning", "Noon", "Afternoon", "Night"],
@@ -83,7 +83,7 @@ const TEMPLATE_OPTIONS = [
   { value: "personal", label: "Personal / Home Budget" }
 ];
 
-// ==================== CUSTOM WEBSITE-THEMED DROPDOWN ENGINE ====================
+// ==================== CUSTOM DROPDOWN ENGINE ====================
 const dropdownRegistry = {};
 
 function renderCustomDropdown(containerId, options, selectedValue, onChange, extraBtnClass = "") {
@@ -145,8 +145,8 @@ document.addEventListener("click", () => {
   document.querySelectorAll(".c-dropdown.open").forEach((el) => el.classList.remove("open"));
 });
 
-// ==================== CUSTOM WEBSITE-THEMED DIALOG ====================
-function openCustomDialog({ title, message, showInput = false, defaultValue = "", okText = "Confirm", danger = false }) {
+// ==================== CUSTOM DIALOG ====================
+function openCustomDialog({ title, message, showInput = false, inputType = "text", defaultValue = "", okText = "Confirm", danger = false }) {
   return new Promise((resolve) => {
     const modal = document.getElementById("customDialogModal");
     const titleEl = document.getElementById("cDlgTitle");
@@ -165,6 +165,7 @@ function openCustomDialog({ title, message, showInput = false, defaultValue = ""
 
     if (showInput) {
       inputWrap.classList.remove("hidden");
+      inputEl.type = inputType;
       inputEl.value = defaultValue;
     } else {
       inputWrap.classList.add("hidden");
@@ -195,6 +196,7 @@ let weekOffset = 0;
 let lastSyncedDateStr = "";
 let unsubWorkspaces = null;
 let unsubEntries = null;
+let isCreatingDefaultWs = false;
 
 let onboardAvatarDataUrl = "";
 let profModalAvatarDataUrl = "";
@@ -205,7 +207,10 @@ let wipeCountdownTimer = null;
 let dashboardBooted = false;
 let initialSessionLockApplied = false;
 let justCompletedSignup = false;
-let aiChatHistory = [];
+
+// Persistent AI Chat Sessions State
+let aiChatSessions = [];
+let activeChatId = null;
 
 let catChartInstance = null;
 let trendChartInstance = null;
@@ -332,7 +337,7 @@ window.toggleStealthBlur = () => {
   btn.innerText = isBlurred ? "🙈" : "👁️";
 };
 
-// ==================== 2. VERIFIED AUTHENTICATION & FORGOT PASSWORD ====================
+// ==================== 2. AUTHENTICATION & EMAIL VERIFICATION ====================
 const googleProvider = new GoogleAuthProvider();
 
 document.getElementById("googleSignInBtn").onclick = async () => {
@@ -519,7 +524,7 @@ function openOnboarding(user) {
   document.getElementById("bottomNavBar").classList.add("hidden");
   document.getElementById("onboardingScreen").classList.remove("hidden");
 
-  const defaultPic = user.photoURL || `https://api.dicebear.com/8.x/avataaars/svg?seed=${user.uid.slice(0, 6)}`;
+  const defaultPic = user.photoURL || "logo.png";
   onboardAvatarDataUrl = defaultPic;
   document.getElementById("onboardAvatarImg").src = defaultPic;
   document.getElementById("onboardFullName").value = user.displayName || "";
@@ -623,6 +628,7 @@ function launchDashboard(lockCalculatorOnBoot = false) {
     dashboardBooted = true;
     syncDateIfNeeded(true);
     subscribeWorkspaces();
+    loadAiChatHistoryStore();
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
         syncDateIfNeeded(false);
@@ -634,8 +640,7 @@ function launchDashboard(lockCalculatorOnBoot = false) {
 
 function updateProfileUI() {
   if (!userProfile) return;
-  document.getElementById("topbarAvatarImg").src =
-    userProfile.photoUrl || "https://api.dicebear.com/8.x/avataaars/svg?seed=User";
+  document.getElementById("topbarAvatarImg").src = userProfile.photoUrl || "logo.png";
 }
 
 function getCurrency() {
@@ -742,10 +747,199 @@ document.getElementById("saveNewCalcPinBtn").onclick = async () => {
   showToast("New Calculator PIN Saved & Unlocked!");
 };
 
-// ==================== 5. SIDE GEMINI AI DATA CHAT ASSISTANT ====================
+// ==================== 5. PERSISTENT GEMINI 3.8 AI CHAT HISTORY (RENAME + DELETE + NEW) ====================
+function getChatStorageKey() {
+  return `hisab_ai_chats_${currentUser?.uid || "guest"}`;
+}
+
+function saveAiChatSessionsToLocal() {
+  try {
+    localStorage.setItem(getChatStorageKey(), JSON.stringify(aiChatSessions));
+  } catch (e) {}
+}
+
+async function syncChatSessionToCloud(sessionObj) {
+  if (!currentUser || !sessionObj) return;
+  try {
+    await setDoc(
+      doc(db, "users", currentUser.uid, "aiChats", sessionObj.id),
+      {
+        title: sessionObj.title,
+        messages: sessionObj.messages,
+        updatedAt: sessionObj.updatedAt
+      },
+      { merge: true }
+    );
+  } catch (e) {}
+}
+
+async function loadAiChatHistoryStore() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(getChatStorageKey()) || "[]");
+    if (Array.isArray(cached) && cached.length > 0) {
+      aiChatSessions = cached;
+      activeChatId = aiChatSessions[0].id;
+      renderActiveChatMessages();
+      renderChatHistoryList();
+    }
+  } catch (e) {}
+
+  if (!currentUser) return;
+  try {
+    const snap = await getDocs(
+      query(collection(db, "users", currentUser.uid, "aiChats"), orderBy("updatedAt", "desc"))
+    );
+    if (!snap.empty) {
+      aiChatSessions = [];
+      snap.forEach((d) => aiChatSessions.push({ id: d.id, ...d.data() }));
+      saveAiChatSessionsToLocal();
+      if (!activeChatId || !aiChatSessions.some((c) => c.id === activeChatId)) {
+        activeChatId = aiChatSessions[0].id;
+      }
+      renderActiveChatMessages();
+      renderChatHistoryList();
+    } else if (aiChatSessions.length === 0) {
+      createNewChatSession(false);
+    }
+  } catch (e) {
+    if (aiChatSessions.length === 0) createNewChatSession(false);
+  }
+}
+
+function getActiveChatSession() {
+  let chat = aiChatSessions.find((c) => c.id === activeChatId);
+  if (!chat) {
+    chat = createNewChatSession(false);
+  }
+  return chat;
+}
+
+function createNewChatSession(closeHistPanel = true) {
+  const newChat = {
+    id: `chat_${Date.now()}`,
+    title: "New AI Chat",
+    messages: [
+      {
+        role: "ai",
+        text: "👋 Hi! I'm Gemini 3.8 with live access to your expenses, splits, and budget. Ask me anything in Bengali, Hindi, or English!"
+      }
+    ],
+    updatedAt: Date.now()
+  };
+  aiChatSessions.unshift(newChat);
+  activeChatId = newChat.id;
+  saveAiChatSessionsToLocal();
+  renderActiveChatMessages();
+  renderChatHistoryList();
+  if (closeHistPanel) {
+    document.getElementById("aiChatHistoryPanel").classList.add("hidden");
+  }
+  return newChat;
+}
+
+function renderActiveChatMessages() {
+  const chat = getActiveChatSession();
+  document.getElementById("activeChatTitle").innerText = chat.title || "New AI Chat";
+  const box = document.getElementById("aiChatMessages");
+  box.innerHTML = "";
+  (chat.messages || []).forEach((m) => {
+    const div = document.createElement("div");
+    div.className = `chat-bubble ${m.role}`;
+    div.innerText = m.text;
+    box.appendChild(div);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderChatHistoryList() {
+  const listWrap = document.getElementById("aiChatHistoryList");
+  if (!listWrap) return;
+  listWrap.innerHTML = "";
+
+  aiChatSessions.forEach((chat) => {
+    const item = document.createElement("div");
+    item.className = `chat-hist-item ${chat.id === activeChatId ? "active" : ""}`;
+    item.innerHTML = `
+      <span class="chat-hist-title">💬 ${escapeHtml(chat.title || "Untitled Chat")}</span>
+      <div class="chat-hist-actions">
+        <button type="button" class="hist-ren-btn" title="Rename">✏️</button>
+        <button type="button" class="hist-del-btn" title="Delete" style="color:var(--rose);">🗑️</button>
+      </div>
+    `;
+
+    item.querySelector(".chat-hist-title").onclick = () => {
+      activeChatId = chat.id;
+      renderActiveChatMessages();
+      renderChatHistoryList();
+      document.getElementById("aiChatHistoryPanel").classList.add("hidden");
+    };
+
+    item.querySelector(".hist-ren-btn").onclick = (e) => {
+      e.stopPropagation();
+      renameChatSession(chat.id);
+    };
+
+    item.querySelector(".hist-del-btn").onclick = (e) => {
+      e.stopPropagation();
+      deleteChatSession(chat.id);
+    };
+
+    listWrap.appendChild(item);
+  });
+}
+
+async function renameChatSession(chatId) {
+  const chat = aiChatSessions.find((c) => c.id === chatId);
+  if (!chat) return;
+  const newName = await openCustomDialog({
+    title: "Rename Conversation",
+    message: "Enter a new title for this chat:",
+    showInput: true,
+    inputType: "text",
+    defaultValue: chat.title,
+    okText: "Save Name"
+  });
+  if (newName && newName.trim()) {
+    chat.title = newName.trim();
+    chat.updatedAt = Date.now();
+    saveAiChatSessionsToLocal();
+    syncChatSessionToCloud(chat);
+    renderActiveChatMessages();
+    renderChatHistoryList();
+    showToast("Chat renamed!");
+  }
+}
+
+async function deleteChatSession(chatId) {
+  const ok = await openCustomDialog({
+    title: "Delete Conversation",
+    message: "Delete this chat history permanently?",
+    okText: "Delete",
+    danger: true
+  });
+  if (!ok) return;
+
+  aiChatSessions = aiChatSessions.filter((c) => c.id !== chatId);
+  saveAiChatSessionsToLocal();
+  if (currentUser) {
+    deleteDoc(doc(db, "users", currentUser.uid, "aiChats", chatId)).catch(() => {});
+  }
+
+  if (aiChatSessions.length === 0) {
+    createNewChatSession(false);
+  } else if (activeChatId === chatId) {
+    activeChatId = aiChatSessions[0].id;
+    renderActiveChatMessages();
+  }
+  renderChatHistoryList();
+  showToast("Chat deleted");
+}
+
 function openAiSideDrawer() {
   document.getElementById("aiDrawerBackdrop").classList.add("show");
   document.getElementById("aiSideDrawer").classList.add("open");
+  renderActiveChatMessages();
+  renderChatHistoryList();
   setTimeout(() => document.getElementById("aiDrawerInput").focus(), 180);
 }
 
@@ -757,12 +951,16 @@ function closeAiSideDrawer() {
 document.getElementById("openAiDrawerBtn").onclick = openAiSideDrawer;
 document.getElementById("closeAiDrawerBtn").onclick = closeAiSideDrawer;
 document.getElementById("aiDrawerBackdrop").onclick = closeAiSideDrawer;
-
-document.getElementById("clearAiChatBtn").onclick = () => {
-  aiChatHistory = [];
-  document.getElementById("aiChatMessages").innerHTML =
-    `<div class="chat-bubble ai">Chat cleared! Ask me anything about your expenses, balances, or budget.</div>`;
+document.getElementById("toggleChatHistoryBtn").onclick = () => {
+  document.getElementById("aiChatHistoryPanel").classList.toggle("hidden");
+  renderChatHistoryList();
 };
+document.getElementById("newAiChatBtn").onclick = () => {
+  createNewChatSession(true);
+  showToast("Started new AI chat");
+};
+document.getElementById("renameActiveChatBtn").onclick = () => renameChatSession(activeChatId);
+document.getElementById("deleteActiveChatBtn").onclick = () => deleteChatSession(activeChatId);
 
 function appendChatBubble(role, text) {
   const box = document.getElementById("aiChatMessages");
@@ -774,59 +972,92 @@ function appendChatBubble(role, text) {
   return div;
 }
 
-function buildLiveFinancialSnapshot() {
-  const ws = getActiveWorkspace();
-  if (!ws) return "No active workspace yet.";
-  const cur = getCurrency();
+// ==================== 6. LIVE FINANCIAL SNAPSHOT & GEMINI 3.8 AI EVERYWHERE ====================
+function computeMemberLedgerStats(ws, rows) {
   const members = ws.members || [];
-
   const paidByMember = {};
+  const shareByMember = {};
   const netBalances = {};
+
   members.forEach((m) => {
     paidByMember[m] = 0;
+    shareByMember[m] = 0;
     netBalances[m] = 0;
   });
 
-  let activeWeekTotal = 0;
-  currentActiveRows.forEach((r) => {
+  rows.forEach((r) => {
     const amt = Number(r.total) || 0;
-    activeWeekTotal += amt;
     const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
     if (payer) {
       paidByMember[payer] += amt;
       netBalances[payer] += amt;
     }
-    const validSplitters = (r.splitBetween || members).filter((m) => Object.prototype.hasOwnProperty.call(netBalances, m));
+
+    const validSplitters = (r.splitBetween || members).filter((m) =>
+      Object.prototype.hasOwnProperty.call(netBalances, m)
+    );
     const activeSplitters = validSplitters.length > 0 ? validSplitters : members;
     if (activeSplitters.length > 0) {
       const share = amt / activeSplitters.length;
-      activeSplitters.forEach((s) => (netBalances[s] -= share));
+      activeSplitters.forEach((s) => {
+        shareByMember[s] += share;
+        netBalances[s] -= share;
+      });
     }
   });
 
+  const debtors = [];
+  const creditors = [];
+  Object.entries(netBalances).forEach(([person, amt]) => {
+    if (amt < -0.5) debtors.push({ person, amt: Math.abs(amt) });
+    else if (amt > 0.5) creditors.push({ person, amt });
+  });
+
+  const transfers = [];
+  let i = 0;
+  let j = 0;
+  while (i < debtors.length && j < creditors.length) {
+    const payAmt = Math.min(debtors[i].amt, creditors[j].amt);
+    transfers.push({ from: debtors[i].person, to: creditors[j].person, amount: Math.round(payAmt) });
+    debtors[i].amt -= payAmt;
+    creditors[j].amt -= payAmt;
+    if (debtors[i].amt < 0.5) i++;
+    if (creditors[j].amt < 0.5) j++;
+  }
+
+  return { paidByMember, shareByMember, netBalances, transfers };
+}
+
+function buildLiveFinancialSnapshot() {
+  const ws = getActiveWorkspace();
+  if (!ws) return "No active workspace.";
+  const cur = getCurrency();
+  const stats = computeMemberLedgerStats(ws, currentActiveRows);
+  const activeWeekTotal = currentActiveRows.reduce((s, r) => s + (Number(r.total) || 0), 0);
   const allTimeTotal = rawData.reduce((s, r) => s + (Number(r.total) || 0), 0);
-  const recentRecords = rawData.slice(0, 35).map((r) => ({
-    date: r.date,
-    paidBy: r.paidBy,
-    splitBetween: r.splitBetween,
-    slots: r.slotValues,
-    other: r.other,
-    total: r.total
-  }));
 
   return JSON.stringify({
     user: userProfile?.fullName,
     currency: cur,
     allWorkspaces: workspaces.map((w) => w.name),
     activeWorkspace: ws.name,
-    members,
+    members: ws.members,
     slots: ws.slots,
     monthlyBudgetLimit: ws.budgetLimit || 5000,
     activeWeekTotal,
     allTimeTotal,
-    paidByMemberActiveWeek: paidByMember,
-    netBalancesActiveWeek: netBalances,
-    recentEntries: recentRecords
+    paidByMemberActiveWeek: stats.paidByMember,
+    consumedShareByMemberActiveWeek: stats.shareByMember,
+    netBalancesActiveWeek: stats.netBalances,
+    settlementTransfers: stats.transfers,
+    recentEntries: rawData.slice(0, 40).map((r) => ({
+      date: r.date,
+      paidBy: r.paidBy,
+      splitBetween: r.splitBetween,
+      slots: r.slotValues,
+      other: r.other,
+      total: r.total
+    }))
   });
 }
 
@@ -834,57 +1065,46 @@ async function askSideAiAssistant(questionText) {
   const q = questionText.trim();
   if (!q) return;
 
+  const chat = getActiveChatSession();
+  if (chat.title === "New AI Chat") {
+    chat.title = q.length > 30 ? q.slice(0, 30) + "..." : q;
+    document.getElementById("activeChatTitle").innerText = chat.title;
+  }
+
+  chat.messages.push({ role: "user", text: q });
+  chat.updatedAt = Date.now();
+  saveAiChatSessionsToLocal();
+  renderChatHistoryList();
+
   appendChatBubble("user", q);
-  const thinkingBubble = appendChatBubble("ai", "Thinking...");
+  const thinkingBubble = appendChatBubble("ai", "Gemini 3.8 is thinking...");
 
   const snapshot = buildLiveFinancialSnapshot();
-  const systemPrompt = `You are HisabCloud Pro's built-in personal AI financial assistant for ${userProfile?.fullName || "the user"}.
-You have complete real-time access to the user's financial data below:
+  const systemPrompt = `You are HisabCloud Pro's ultra-smart personal financial AI (powered by Gemini 3.8) for ${userProfile?.fullName || "the user"}.
+Live database snapshot:
 ${snapshot}
 
-Rules:
-1. Answer the user's question accurately using ONLY the live data provided above.
-2. Reply in the exact language the user asked in (English, Bengali, or Hindi).
-3. Be warm, concise, clear, and use bullet points or clean numbers with ${getCurrency()}. Do not use raw markdown asterisks like ** if plain clean text reads better.`;
+Instructions:
+1. Answer with 100% mathematical accuracy using the live data above.
+2. Reply in the exact language/script the user used (Bengali, Hindi, or English).
+3. Keep formatting super clean with bullet points and ${getCurrency()} amounts.`;
 
-  aiChatHistory.push({ role: "user", parts: [{ text: q }] });
-  const contents = [
-    { role: "user", parts: [{ text: systemPrompt }] },
-    ...aiChatHistory.slice(-8)
-  ];
+  const historyTurns = chat.messages.slice(-10).map((m) => ({
+    role: m.role === "user" ? "user" : "model",
+    parts: [{ text: m.text }]
+  }));
 
-  const apiKey = getActiveGeminiKey();
-  const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
-  let replyText = null;
+  const { text: replyText, error } = await runGeminiAI({
+    contents: [{ role: "user", parts: [{ text: systemPrompt }] }, ...historyTurns]
+  });
 
-  for (const model of models) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-goog-api-key": apiKey
-          },
-          body: JSON.stringify({ contents })
-        }
-      );
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (res.ok && text) {
-        replyText = text.trim();
-        break;
-      }
-    } catch (e) {}
-  }
+  const finalReply = replyText || `⚠️ ${error || "Could not connect to Gemini 3.8 right now."}`;
+  thinkingBubble.innerText = finalReply;
 
-  if (replyText) {
-    thinkingBubble.innerText = replyText;
-    aiChatHistory.push({ role: "model", parts: [{ text: replyText }] });
-  } else {
-    thinkingBubble.innerText = "Sorry, I couldn't connect to Gemini right now. Please check your internet or API key.";
-  }
+  chat.messages.push({ role: "ai", text: finalReply });
+  chat.updatedAt = Date.now();
+  saveAiChatSessionsToLocal();
+  syncChatSessionToCloud(chat);
 }
 
 document.getElementById("aiDrawerForm").onsubmit = async (e) => {
@@ -899,10 +1119,60 @@ document.querySelectorAll(".ai-chip-ask").forEach((chip) => {
   chip.onclick = () => askSideAiAssistant(chip.dataset.q);
 });
 
-// ==================== 6. PROFILE, SETTINGS & HIGH-FRICTION DATA WIPE ====================
+// Analytics Tab Deep Forecast AI
+document.getElementById("aiAnalyticsRunBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const out = document.getElementById("aiAnalyticsOutput");
+  if (!ws || rawData.length === 0) {
+    out.innerText = "Add some expense entries first so Gemini 3.8 can forecast your budget!";
+    out.classList.remove("hidden");
+    return;
+  }
+  out.innerText = "🧠 Gemini 3.8 is analyzing your spending trends & forecasting month-end...";
+  out.classList.remove("hidden");
+
+  const { text, error } = await runGeminiAI({
+    parts: [
+      {
+        text: `Analyze this financial data for workspace "${ws.name}": ${buildLiveFinancialSnapshot()}.
+Today is day ${new Date().getDate()} of the month.
+Provide:
+1) Projected month-end total spend vs monthly budget limit (${getCurrency()}${ws.budgetLimit || 5000}).
+2) Highest spending slot/category and 2 actionable tips to save money.
+Keep it crisp (max 70 words) in simple English.`
+      }
+    ]
+  });
+  out.innerText = text ? `🔮 ${text}` : `⚠️ ${error}`;
+};
+
+// Split & Settlements Tab AI Breakdown
+document.getElementById("aiSplitExplainBtn").onclick = async () => {
+  const ws = getActiveWorkspace();
+  const box = document.getElementById("aiSplitExplainBox");
+  if (!ws || currentActiveRows.length === 0) {
+    box.innerText = "No active week records to explain yet.";
+    box.classList.remove("hidden");
+    return;
+  }
+  box.innerText = "✨ Gemini 3.8 is calculating exact per-member breakdown...";
+  box.classList.remove("hidden");
+
+  const { text, error } = await runGeminiAI({
+    parts: [
+      {
+        text: `Explain the group split & settlement math clearly for "${ws.name}" using this exact data: ${buildLiveFinancialSnapshot()}.
+Show how much each member paid, their consumed share, and who needs to pay whom to settle up. Max 65 words, very clear.`
+      }
+    ]
+  });
+  box.innerText = text ? `⚖️ ${text}` : `⚠️ ${error}`;
+};
+
+// ==================== 7. PROFILE, SETTINGS & HIGH-FRICTION DATA WIPE ====================
 window.openProfileSettings = () => {
   if (!userProfile) return;
-  profModalAvatarDataUrl = userProfile.photoUrl || "";
+  profModalAvatarDataUrl = userProfile.photoUrl || "logo.png";
   document.getElementById("profModalAvatarImg").src = profModalAvatarDataUrl;
   document.getElementById("profModalEmail").innerText = currentUser.email || "";
   document.getElementById("profModalName").value = userProfile.fullName || "";
@@ -1018,6 +1288,7 @@ document.getElementById("finalWipeExecuteBtn").onclick = async () => {
     }
     await deleteDoc(doc(db, "users", currentUser.uid));
     localStorage.removeItem(`hisab_prof_${currentUser.uid}`);
+    localStorage.removeItem(getChatStorageKey());
     localStorage.removeItem("hisabcloud_pin");
 
     window.closeDeleteAllModal();
@@ -1031,15 +1302,35 @@ document.getElementById("finalWipeExecuteBtn").onclick = async () => {
   }
 };
 
-// ==================== 7. WORKSPACES & FULL CUSTOMIZATION ====================
+// ==================== 8. WORKSPACES & CUSTOMIZATION (AUTO-HEALS EMPTY WORKSPACE) ====================
 function subscribeWorkspaces() {
   if (unsubWorkspaces) unsubWorkspaces();
   const q = query(collection(db, "users", currentUser.uid, "workspaces"), orderBy("createdAt", "asc"));
-  unsubWorkspaces = onSnapshot(q, (snap) => {
+  unsubWorkspaces = onSnapshot(q, async (snap) => {
     workspaces = [];
     snap.forEach((d) => workspaces.push({ id: d.id, ...d.data() }));
 
-    if (workspaces.length === 0) return;
+    if (workspaces.length === 0) {
+      if (!isCreatingDefaultWs) {
+        isCreatingDefaultWs = true;
+        try {
+          const tpl = WORKSPACE_TEMPLATES.mess;
+          await addDoc(collection(db, "users", currentUser.uid, "workspaces"), {
+            name: "My Ledger",
+            templateKey: "mess",
+            slots: tpl.slots,
+            presets: tpl.presets,
+            members: [userProfile?.fullName || "Me"],
+            upiId: userProfile?.upiId || "",
+            budgetLimit: 5000,
+            createdAt: serverTimestamp()
+          });
+        } finally {
+          isCreatingDefaultWs = false;
+        }
+      }
+      return;
+    }
 
     if (!activeWorkspaceId || !workspaces.some((w) => w.id === activeWorkspaceId)) {
       activeWorkspaceId = workspaces[0].id;
@@ -1147,8 +1438,14 @@ function renderDynamicEntryForm(ws) {
   const presets = ws.presets || [];
   const members = ws.members || [userProfile.fullName];
 
+  const defaultPayer =
+    members.find((m) => m.toLowerCase() === (userProfile?.fullName || "").toLowerCase()) || members[0];
   const memberOpts = members.map((m) => ({ value: m, label: m }));
-  renderCustomDropdown("dd-entryPaidBy", memberOpts, members[0]);
+
+  // Re-load existing entry for selected Date + Payer whenever Paid By changes!
+  renderCustomDropdown("dd-entryPaidBy", memberOpts, defaultPayer, () => {
+    window.loadEntryForSelectedDate();
+  });
 
   const splitSec = document.getElementById("entrySplitSection");
   const splitPillsWrap = document.getElementById("entrySplitPills");
@@ -1352,7 +1649,7 @@ document.getElementById("deleteWsBtn").onclick = async () => {
   showToast("Workspace deleted");
 };
 
-// ==================== 8. SMART INPUT & ENTRY LOGIC ====================
+// ==================== 9. SMART INPUT & PER-PAYER ENTRY SYNC ====================
 window.switchTab = (tabName, el) => {
   document.querySelectorAll(".tab-view").forEach((v) => v.classList.remove("active"));
   document.querySelectorAll(".nav-tab").forEach((t) => t.classList.remove("active"));
@@ -1486,6 +1783,7 @@ function parseEntryDate(dateStr) {
   return new Date(parts[2], parts[1] - 1, parts[0]);
 }
 
+// Match existing record by BOTH Date AND Paid By member so 2+ members never overwrite each other!
 window.loadEntryForSelectedDate = () => {
   const ws = getActiveWorkspace();
   const isoDate = document.getElementById("entryDate").value;
@@ -1494,15 +1792,17 @@ window.loadEntryForSelectedDate = () => {
 
   if (!ws || !isoDate) return;
   const dateFormatted = formatDateWithDay(isoDate);
-  const existing = rawData.find((r) => r.date === dateFormatted);
+  const members = ws.members || [userProfile.fullName];
+  const selectedPayer = getDropdownValue("dd-entryPaidBy") || members[0];
+
+  const existing = rawData.find(
+    (r) => r.date === dateFormatted && (r.paidBy || members[0]) === selectedPayer
+  );
 
   const slots = ws.slots || [];
-  const members = ws.members || [userProfile.fullName];
-  const memberOpts = members.map((m) => ({ value: m, label: m }));
 
   if (existing) {
     activeEditDocId = existing.docId;
-    renderCustomDropdown("dd-entryPaidBy", memberOpts, existing.paidBy || members[0]);
 
     const activeSplitSet = new Set(existing.splitBetween || members);
     document.querySelectorAll("#entrySplitPills .split-pill").forEach((pill) => {
@@ -1527,13 +1827,12 @@ window.loadEntryForSelectedDate = () => {
       resetOthersContainer("othersContainer", []);
     }
 
-    document.getElementById("syncBannerText").innerText = `✏️ Loaded ${dateFormatted.split(" ")[0]} — add/edit & update`;
+    document.getElementById("syncBannerText").innerText = `✏️ ${selectedPayer}'s log (${dateFormatted.split(" ")[0]}) loaded`;
     banner.classList.add("show");
     saveBtn.innerText = "Update Entry →";
     saveBtn.classList.add("update-mode");
   } else {
     activeEditDocId = null;
-    renderCustomDropdown("dd-entryPaidBy", memberOpts, members[0]);
     document.querySelectorAll("#entrySplitPills .split-pill").forEach((pill) => {
       pill.classList.add("active");
       pill.innerText = `✓ ${pill.dataset.member}`;
@@ -1582,7 +1881,9 @@ window.submitExpense = async () => {
     return showToast("Enter at least one expense item", "error");
   }
 
-  const existingRecord = rawData.find((r) => r.date === dateFormatted);
+  const existingRecord = rawData.find(
+    (r) => r.date === dateFormatted && (r.paidBy || ws.members[0]) === paidBy
+  );
   const targetDocId = activeEditDocId || (existingRecord ? existingRecord.docId : null);
 
   btn.innerText = targetDocId ? "Updating..." : "Saving...";
@@ -1601,11 +1902,11 @@ window.submitExpense = async () => {
   try {
     if (targetDocId) {
       await updateDoc(doc(db, "users", currentUser.uid, "workspaces", ws.id, "entries", targetDocId), entryPayload);
-      showToast("Day entry updated!");
+      showToast(`${paidBy}'s entry updated!`);
     } else {
       entryPayload.createdAt = serverTimestamp();
       await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"), entryPayload);
-      showToast("Entry saved to cloud!");
+      showToast(`Saved ${paidBy}'s entry!`);
     }
   } catch (err) {
     showToast("Save failed: " + err.message, "error");
@@ -1615,36 +1916,7 @@ window.submitExpense = async () => {
   }
 };
 
-// ==================== 9. ULTRA-SMART GEMINI AI (BILL SCANNER + AUTO-SLOT FILTER) ====================
-async function callGeminiAI(parts) {
-  const apiKey = getActiveGeminiKey();
-  const models = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"];
-  let lastError = "";
-
-  for (const model of models) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-goog-api-key": apiKey
-          },
-          body: JSON.stringify({ contents: [{ parts }] })
-        }
-      );
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (res.ok && text) return { text, error: null };
-      if (data.error?.message) lastError = data.error.message;
-    } catch (e) {
-      lastError = e.message;
-    }
-  }
-  return { text: null, error: lastError || "AI connection failed" };
-}
-
+// ==================== 10. GEMINI 3.8 SMART LOGGER & RECEIPT FILTER ====================
 function extractJsonObject(rawText) {
   if (!rawText) return null;
   const match = rawText.match(/\{[\s\S]*\}/);
@@ -1670,14 +1942,25 @@ async function applyMultiItemAiExpense(parsed) {
   }
 
   const dateFormatted = formatDateWithDay(isoDate);
-  const existing = rawData.find((r) => r.date === dateFormatted);
-
   const slots = ws.slots || [];
   const members = ws.members || [userProfile.fullName];
+  const currentDropdownPayer = getDropdownValue("dd-entryPaidBy") || members[0];
+
   const paidBy =
     members.find((m) => m.toLowerCase() === String(parsed.paidBy || "").toLowerCase()) ||
-    existing?.paidBy ||
-    members[0];
+    currentDropdownPayer;
+
+  let splitBetween = members;
+  if (Array.isArray(parsed.splitBetween) && parsed.splitBetween.length > 0) {
+    const matched = members.filter((m) =>
+      parsed.splitBetween.some((p) => m.toLowerCase().includes(String(p).toLowerCase()))
+    );
+    if (matched.length > 0) splitBetween = matched;
+  }
+
+  const existing = rawData.find(
+    (r) => r.date === dateFormatted && (r.paidBy || members[0]) === paidBy
+  );
 
   const slotValues = existing ? { ...(existing.slotValues || {}) } : {};
   const extraItems = existing?.other ? existing.other.split(",").map((x) => x.trim()).filter(Boolean) : [];
@@ -1708,7 +1991,7 @@ async function applyMultiItemAiExpense(parsed) {
   const payload = {
     date: dateFormatted,
     paidBy,
-    splitBetween: existing?.splitBetween || members,
+    splitBetween: existing?.splitBetween || splitBetween,
     slotValues,
     other: otherText,
     total,
@@ -1722,7 +2005,7 @@ async function applyMultiItemAiExpense(parsed) {
     await addDoc(collection(db, "users", currentUser.uid, "workspaces", ws.id, "entries"), payload);
   }
 
-  return summaryParts.join(" | ");
+  return `${paidBy}: ${summaryParts.join(" | ")}`;
 }
 
 document.getElementById("aiSmartAddBtn").onclick = async () => {
@@ -1732,25 +2015,31 @@ document.getElementById("aiSmartAddBtn").onclick = async () => {
   const text = input.value.trim();
   if (!ws || !text) return;
 
-  banner.innerText = "✨ Gemini AI is sorting items into slots...";
+  banner.innerText = "✨ Gemini 3.8 is filtering items, payer & slots...";
   banner.classList.remove("hidden");
 
-  const prompt = `Extract expenses from: "${text}".
+  const defaultPayer = getDropdownValue("dd-entryPaidBy") || ws.members[0];
+  const prompt = `Extract expenses from this text (may be English, Bengali, or Hindi): "${text}".
 Available slots: ${JSON.stringify(ws.slots)}.
 Available members: ${JSON.stringify(ws.members)}.
-For each item, pick the smartest matching slot from ${JSON.stringify(ws.slots)} (or "Other").
-Return ONLY valid JSON: {"date": null, "paidBy": string, "items": [{"name": string, "amount": number, "slot": string}]}.`;
+Default payer if none specified: "${defaultPayer}".
+For each item, assign the smartest matching slot from ${JSON.stringify(ws.slots)} (or "Other").
+If specific members are mentioned for splitting, list them in splitBetween, otherwise return all members.
+Return ONLY valid JSON: {"date": null, "paidBy": string, "splitBetween": [string], "items": [{"name": string, "amount": number, "slot": string}]}.`;
 
-  const { text: aiReply, error } = await callGeminiAI([{ text: prompt }]);
+  const { text: aiReply, error } = await runGeminiAI({
+    parts: [{ text: prompt }],
+    jsonMode: true
+  });
   const parsed = extractJsonObject(aiReply);
 
   const summary = await applyMultiItemAiExpense(parsed);
   if (summary) {
     input.value = "";
-    banner.innerText = `✅ Auto-Logged: ${summary}`;
+    banner.innerText = `✅ Auto-Logged (${summary})`;
     setTimeout(() => banner.classList.add("hidden"), 4500);
   } else {
-    banner.innerText = error ? `⚠️ ${error}` : 'Try: "20 tea and 60 lunch" (or use ✨ AI Chat to ask questions)';
+    banner.innerText = error ? `⚠️ ${error}` : 'Try: "20 tea & 60 rice paid by joydeb"';
   }
 };
 
@@ -1760,27 +2049,31 @@ document.getElementById("aiReceiptFile").onchange = async (e) => {
   if (!file || !ws) return;
 
   const banner = document.getElementById("aiStatusBanner");
-  banner.innerText = "📷 Filtering receipt items & auto-mapping slots with Gemini Vision...";
+  banner.innerText = "📷 Filtering receipt items with Gemini 3.8 Vision...";
   banner.classList.remove("hidden");
 
   try {
     const compressed = await compressImage(file, 960, 0.84);
+    const defaultPayer = getDropdownValue("dd-entryPaidBy") || ws.members[0];
     const prompt = `Analyze this receipt/bill image carefully.
-Filter out tax lines, subtotals, phone numbers, and store headers—extract ONLY the actual purchased items (or grand total as 1 item if line items aren't readable).
+Filter out GST/tax lines, subtotals, phone numbers, and store headers—extract ONLY the actual purchased items (or grand total as 1 item if line items aren't readable).
 Assign each item to the smartest matching slot from ${JSON.stringify(ws.slots)} (use "Other" if none fit).
 Also extract receipt date in YYYY-MM-DD format if clearly visible (otherwise null).
 Return ONLY valid JSON:
-{"date": "YYYY-MM-DD or null", "paidBy": "${ws.members[0]}", "items": [{"name": string, "amount": number, "slot": string}]}`;
+{"date": "YYYY-MM-DD or null", "paidBy": "${defaultPayer}", "splitBetween": ${JSON.stringify(ws.members)}, "items": [{"name": string, "amount": number, "slot": string}]}`;
 
-    const { text: aiReply, error } = await callGeminiAI([
-      { text: prompt },
-      { inline_data: { mime_type: compressed.mime, data: compressed.base64 } }
-    ]);
+    const { text: aiReply, error } = await runGeminiAI({
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: compressed.mime, data: compressed.base64 } }
+      ],
+      jsonMode: true
+    });
 
     const parsed = extractJsonObject(aiReply);
     const summary = await applyMultiItemAiExpense(parsed);
     if (summary) {
-      banner.innerText = `✅ Bill Filtered & Logged: ${summary}`;
+      banner.innerText = `✅ Bill Filtered & Logged (${summary})`;
       setTimeout(() => banner.classList.add("hidden"), 5000);
     } else {
       banner.innerText = error ? `⚠️ ${error}` : "Could not read items from receipt. Try a clearer photo.";
@@ -1800,23 +2093,21 @@ document.getElementById("aiAuditTriggerBtn").onclick = async () => {
     return;
   }
 
-  banner.innerText = "🧠 Gemini AI is auditing your spending pattern...";
+  banner.innerText = "🧠 Gemini 3.8 is auditing your spending & split balance...";
   banner.classList.remove("hidden");
 
-  const summary = currentActiveRows
-    .map((r) => `${r.date}: Total ${getCurrency()}${r.total} (Paid by ${r.paidBy}, ${JSON.stringify(r.slotValues)})`)
-    .join("; ");
-
-  const { text: advice, error } = await callGeminiAI([
-    {
-      text: `Audit these expenses for "${ws.name}": ${summary}. Give 2 short, sharp money-saving insights in simple English (max 45 words).`
-    }
-  ]);
+  const { text: advice, error } = await runGeminiAI({
+    parts: [
+      {
+        text: `Audit this live ledger for "${ws.name}": ${buildLiveFinancialSnapshot()}. Give 2 short, sharp insights on spending and member balances in simple English (max 50 words).`
+      }
+    ]
+  });
 
   banner.innerText = advice ? `💡 ${advice}` : `⚠️ ${error}`;
 };
 
-// ==================== 10. LEDGER TABLE, EDIT MODAL, SMART SPLIT & CHARTS ====================
+// ==================== 11. LEDGER TABLE, EDIT MODAL, SMART SPLIT & CHARTS ====================
 window.openEdit = (docId) => {
   const ws = getActiveWorkspace();
   const item = rawData.find((r) => r.docId === docId);
@@ -2060,7 +2351,7 @@ function renderTable() {
   const colSpan = slots.length + 5;
   if (displayRows.length === 0) {
     tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center; padding:18px; color:var(--muted);">No expense records found for this period.</td></tr>`;
-    updateStats(0, 0, ws);
+    updateStats(0, [], ws);
     renderSmartSplit(ws, []);
     weekDelCont.innerHTML = "";
     return;
@@ -2068,10 +2359,12 @@ function renderTable() {
 
   let viewTotal = 0;
   const currentDocIds = [];
+  const uniqueDates = new Set();
 
   displayRows.forEach((r) => {
     currentDocIds.push(r.docId);
     viewTotal += Number(r.total) || 0;
+    uniqueDates.add(r.date.split(" ")[0]);
 
     const slotCells = slots
       .map((s) => `<td>${escapeHtml(r.slotValues?.[s] || "-")}</td>`)
@@ -2098,19 +2391,32 @@ function renderTable() {
     weekDelCont.innerHTML = "";
   }
 
-  updateStats(viewTotal, displayRows.length, ws);
+  updateStats(viewTotal, displayRows, ws, uniqueDates.size);
   renderSmartSplit(ws, displayRows);
   if (document.getElementById("tab-analytics").classList.contains("active")) renderCharts();
 }
 window.renderTable = renderTable;
 
-function updateStats(total, count, ws) {
+function updateStats(total, rows, ws, loggedDayCount = 0) {
   const cur = getCurrency();
-  const memCount = (ws.members || []).length || 1;
+  const members = ws.members || [];
   document.getElementById("statTotal").innerText = `${cur}${total}`;
-  document.getElementById("statAvg").innerText = count > 0 ? `${cur}${Math.round(total / count)}` : `${cur}0`;
-  document.getElementById("statEntries").innerText = `${count} Days`;
-  document.getElementById("statPerMember").innerText = `${cur}${Math.round(total / memCount)}`;
+  document.getElementById("statAvg").innerText = loggedDayCount > 0 ? `${cur}${Math.round(total / loggedDayCount)}` : `${cur}0`;
+  document.getElementById("statEntries").innerText = `${loggedDayCount} Days`;
+
+  const shareLbl = document.getElementById("statShareLabel");
+  const perMemEl = document.getElementById("statPerMember");
+
+  if (members.length <= 1) {
+    if (shareLbl) shareLbl.innerText = "Per Member";
+    perMemEl.innerText = `${cur}${Math.round(total)}`;
+  } else {
+    const stats = computeMemberLedgerStats(ws, rows);
+    const myName =
+      members.find((m) => m.toLowerCase() === (userProfile?.fullName || "").toLowerCase()) || members[0];
+    if (shareLbl) shareLbl.innerText = `${myName}'s Share`;
+    perMemEl.innerText = `${cur}${Math.round(stats.shareByMember[myName] || 0)}`;
+  }
 }
 
 function renderSmartSplit(ws, rows) {
@@ -2119,66 +2425,34 @@ function renderSmartSplit(ws, rows) {
   const balWrap = document.getElementById("memberBalancesWrap");
   const transWrap = document.getElementById("settlementTransfersWrap");
 
-  const paidByMember = {};
-  const netBalances = {};
-  members.forEach((m) => {
-    paidByMember[m] = 0;
-    netBalances[m] = 0;
-  });
-
-  rows.forEach((r) => {
-    const amt = Number(r.total) || 0;
-    const payer = r.paidBy && Object.prototype.hasOwnProperty.call(paidByMember, r.paidBy) ? r.paidBy : members[0];
-    if (payer) {
-      paidByMember[payer] += amt;
-      netBalances[payer] += amt;
-    }
-
-    const validSplitters = (r.splitBetween || members).filter((m) =>
-      Object.prototype.hasOwnProperty.call(netBalances, m)
-    );
-    const activeSplitters = validSplitters.length > 0 ? validSplitters : members;
-    if (activeSplitters.length > 0) {
-      const share = amt / activeSplitters.length;
-      activeSplitters.forEach((s) => (netBalances[s] -= share));
-    }
-  });
+  const { paidByMember, shareByMember, netBalances, transfers } = computeMemberLedgerStats(ws, rows);
 
   balWrap.innerHTML = "";
   members.forEach((m) => {
     const net = netBalances[m];
+    let badgeText = `Settled ${cur}0`;
+    let badgeColor = "var(--cyan)";
+    if (net > 0.5) {
+      badgeText = `Gets ${cur}${Math.round(net)}`;
+      badgeColor = "var(--primary)";
+    } else if (net < -0.5) {
+      badgeText = `Owes ${cur}${Math.round(Math.abs(net))}`;
+      badgeColor = "var(--rose)";
+    }
+
     const row = document.createElement("div");
     row.className = "split-row";
     row.innerHTML = `
       <div>
         <strong>${escapeHtml(m)}</strong>
-        <span style="display:block; font-size:10px; color:var(--muted);">Paid ${cur}${paidByMember[m].toFixed(0)}</span>
+        <span style="display:block; font-size:10px; color:var(--muted);">
+          Paid ${cur}${Math.round(paidByMember[m])} • Share ${cur}${Math.round(shareByMember[m])}
+        </span>
       </div>
-      <span style="font-weight:800; color:${net >= -0.5 ? "var(--primary)" : "var(--rose)"};">
-        ${net >= -0.5 ? `Gets ${cur}${Math.abs(net).toFixed(0)}` : `Owes ${cur}${Math.abs(net).toFixed(0)}`}
-      </span>
+      <span style="font-weight:800; color:${badgeColor};">${badgeText}</span>
     `;
     balWrap.appendChild(row);
   });
-
-  const debtors = [];
-  const creditors = [];
-  Object.entries(netBalances).forEach(([person, amt]) => {
-    if (amt < -0.5) debtors.push({ person, amt: Math.abs(amt) });
-    else if (amt > 0.5) creditors.push({ person, amt });
-  });
-
-  const transfers = [];
-  let i = 0;
-  let j = 0;
-  while (i < debtors.length && j < creditors.length) {
-    const payAmt = Math.min(debtors[i].amt, creditors[j].amt);
-    transfers.push({ from: debtors[i].person, to: creditors[j].person, amount: payAmt });
-    debtors[i].amt -= payAmt;
-    creditors[j].amt -= payAmt;
-    if (debtors[i].amt < 0.5) i++;
-    if (creditors[j].amt < 0.5) j++;
-  }
 
   transWrap.innerHTML = "";
   if (transfers.length === 0) {
@@ -2187,7 +2461,7 @@ function renderSmartSplit(ws, rows) {
     const upiId = ws.upiId || userProfile.upiId || "";
     transfers.forEach((tr) => {
       const upiUrl = upiId
-        ? `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(tr.to)}&am=${tr.amount.toFixed(0)}&cu=INR`
+        ? `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(tr.to)}&am=${tr.amount}&cu=INR`
         : "";
 
       const row = document.createElement("div");
@@ -2196,7 +2470,7 @@ function renderSmartSplit(ws, rows) {
         <div>
           <strong style="color:var(--rose);">${escapeHtml(tr.from)}</strong> →
           <strong style="color:var(--primary);">${escapeHtml(tr.to)}</strong>
-          <span style="margin-left:6px; font-weight:800;">${cur}${tr.amount.toFixed(0)}</span>
+          <span style="margin-left:6px; font-weight:800;">${cur}${tr.amount}</span>
         </div>
         ${
           upiUrl
@@ -2210,7 +2484,7 @@ function renderSmartSplit(ws, rows) {
       const qrBtn = row.querySelector(".qr-open-btn");
       if (qrBtn) {
         qrBtn.onclick = () => {
-          document.getElementById("qrModalTitle").innerText = `${tr.from} → ${tr.to} (${cur}${tr.amount.toFixed(0)})`;
+          document.getElementById("qrModalTitle").innerText = `${tr.from} → ${tr.to} (${cur}${tr.amount})`;
           document.getElementById("qrModalUpiLabel").innerText = `UPI: ${upiId}`;
           document.getElementById("qrModalImg").src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiUrl)}`;
           document.getElementById("qrModal").classList.add("show");
@@ -2228,6 +2502,7 @@ window.setMonthlyBudget = async () => {
     title: "Monthly Budget Limit",
     message: `Set your target monthly spending limit (${getCurrency()}):`,
     showInput: true,
+    inputType: "number",
     defaultValue: String(ws.budgetLimit || 5000),
     okText: "Save Limit"
   });
@@ -2323,7 +2598,7 @@ function renderCharts() {
   });
 }
 
-// ==================== 11. CLEAN EXCEL/CSV, WHATSAPP SHARE & PDF REPORT ====================
+// ==================== 12. EXCEL/CSV, WHATSAPP SHARE & PDF REPORT ====================
 window.exportCSV = async () => {
   const ws = getActiveWorkspace();
   if (!ws || rawData.length === 0) return showToast("No records available to export", "error");

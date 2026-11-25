@@ -1,4 +1,4 @@
-// firebase-config.js — HisabCloud Pro Firebase & Split Gemini Configuration
+// firebase-config.js — HisabCloud Pro Firebase & Central Gemini 3.8 AI Engine
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -30,4 +30,42 @@ export function getActiveGeminiKey() {
     return customKey.trim();
   }
   return (GEMINI_PART_1 + GEMINI_PART_2 + GEMINI_PART_3 + GEMINI_PART_4).trim();
+}
+
+// Universal Gemini 3.8 AI Caller
+export async function runGeminiAI({ contents, parts, jsonMode = false }) {
+  const apiKey = getActiveGeminiKey();
+  const models = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-flash-latest"];
+  const payloadContents = contents || [{ role: "user", parts }];
+  const bodyObj = { contents: payloadContents };
+
+  if (jsonMode) {
+    bodyObj.generationConfig = { responseMimeType: "application/json" };
+  }
+
+  let lastError = "";
+  for (const model of models) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-goog-api-key": apiKey
+          },
+          body: JSON.stringify(bodyObj)
+        }
+      );
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (res.ok && text) {
+        return { text: text.trim(), error: null };
+      }
+      if (data.error?.message) lastError = data.error.message;
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+  return { text: null, error: lastError || "AI connection failed" };
 }
