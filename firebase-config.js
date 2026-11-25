@@ -1,4 +1,4 @@
-// firebase-config.js — HisabCloud Pro Firebase & Central Gemini 3.8 AI Engine
+// firebase-config.js — HisabCloud Pro Firebase & Auto-Fallback Gemini 3.8 Engine
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -32,10 +32,15 @@ export function getActiveGeminiKey() {
   return (GEMINI_PART_1 + GEMINI_PART_2 + GEMINI_PART_3 + GEMINI_PART_4).trim();
 }
 
-// Universal Gemini 3.8 AI Caller
+// Universal Gemini 3.8 AI Caller with Auto-Fallback & 12s Timeout
 export async function runGeminiAI({ contents, parts, jsonMode = false }) {
   const apiKey = getActiveGeminiKey();
-  const models = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-flash-latest"];
+  const models = [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite"
+  ];
   const payloadContents = contents || [{ role: "user", parts }];
   const bodyObj = { contents: payloadContents };
 
@@ -45,6 +50,9 @@ export async function runGeminiAI({ contents, parts, jsonMode = false }) {
 
   let lastError = "";
   for (const model of models) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -54,9 +62,11 @@ export async function runGeminiAI({ contents, parts, jsonMode = false }) {
             "Content-Type": "application/json",
             "X-goog-api-key": apiKey
           },
-          body: JSON.stringify(bodyObj)
+          body: JSON.stringify(bodyObj),
+          signal: controller.signal
         }
       );
+      clearTimeout(timer);
       const data = await res.json();
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (res.ok && text) {
@@ -64,7 +74,8 @@ export async function runGeminiAI({ contents, parts, jsonMode = false }) {
       }
       if (data.error?.message) lastError = data.error.message;
     } catch (err) {
-      lastError = err.message;
+      clearTimeout(timer);
+      lastError = err.name === "AbortError" ? "Server timeout, switching model..." : err.message;
     }
   }
   return { text: null, error: lastError || "AI connection failed" };
